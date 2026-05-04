@@ -1,0 +1,3 @@
+# CleanCLI - Windows 系统垃圾清理工具
+# 纯标准库实现，无外部依赖
+# Python >= 3.8
