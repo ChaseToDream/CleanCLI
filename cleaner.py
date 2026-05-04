@@ -1,7 +1,8 @@
 """
-CleanCLI - 核心清理引擎 v2.0
+CleanCLI - 核心清理引擎 v2.1
 深度扫描和清理Windows系统垃圾文件：临时文件、回收站、浏览器缓存、
-系统日志、崩溃转储、.NET/Java/npm/pip缓存、Windows Store、Installer缓存等
+系统日志、崩溃转储、.NET/Java/npm/pip/Go/Rust/Conda缓存、
+Windows Store、Installer缓存、VS Code、Docker、包管理器缓存等
 支持年龄过滤和大小阈值
 """
 
@@ -110,7 +111,41 @@ def _is_path_safe(path: str) -> bool:
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "crashdumps").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "notifications").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "d3dscache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "fontcache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "recent").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm-cache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "pip", "cache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "yarn", "cache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "sun", "java").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "oracle", "java").lower(),
+        os.path.join(os.environ.get("ProgramData", ""), "microsoft", "windows defender", "scans").lower(),
+        # v2.1 新增安全路径
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "brave software").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "vivaldi").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "opera software").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "programs", "microsoft vs code").lower(),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "cache").lower(),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "cacheddata").lower(),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "logs").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "docker").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "go").lower(),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cache").lower(),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "registry").lower(),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "git").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "pip", "cache").lower(),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".conda", "pkgs").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "chocolatey").lower(),
+        os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "cache").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onenote").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "outlook").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "teams").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onedrive").lower(),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "packages").lower(),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "localservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization").lower(),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "networkservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization").lower(),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "performance", "winsat").lower(),
     ]
     for prefix in safe_prefixes:
         if prefix and path_lower.startswith(prefix):
@@ -150,26 +185,47 @@ class JunkScanner:
             ("系统临时文件", self._scan_system_temp),
             ("Windows更新缓存", self._scan_windows_update),
             ("系统日志文件", self._scan_system_logs),
+            ("事件日志压缩备份", self._scan_event_log_archives),
             ("缩略图缓存", self._scan_thumbnails),
+            ("图标缓存", self._scan_icon_cache),
+            ("字体缓存", self._scan_font_cache),
             ("Windows错误报告", self._scan_error_reports),
             ("崩溃转储文件", self._scan_crash_dumps),
             ("预取文件", self._scan_prefetch),
-            ("字体缓存", self._scan_font_cache),
-            ("图标缓存", self._scan_icon_cache),
+            ("Windows.old旧系统", self._scan_windows_old),
+            ("ChkDsk碎片文件", self._scan_chk_files),
             ("浏览器缓存 - Chrome", self._scan_chrome_cache),
             ("浏览器缓存 - Edge", self._scan_edge_cache),
             ("浏览器缓存 - Firefox", self._scan_firefox_cache),
+            ("浏览器缓存 - Chromium系", self._scan_chromium_browsers),
             ("Windows Store缓存", self._scan_store_cache),
             ("Windows Installer缓存", self._scan_installer_cache),
             ("Delivery Optimization", self._scan_delivery_optimization),
+            ("Windows Spotlight缓存", self._scan_spotlight_cache),
+            ("Windows性能日志", self._scan_performance_logs),
+            ("Windows遥测诊断数据", self._scan_telemetry),
             (".NET临时文件", self._scan_dotnet_temp),
             ("Java缓存", self._scan_java_cache),
             ("npm缓存", self._scan_npm_cache),
             ("pip缓存", self._scan_pip_cache),
             ("yarn缓存", self._scan_yarn_cache),
+            ("Go模块缓存", self._scan_go_cache),
+            ("Rust/Cargo缓存", self._scan_cargo_cache),
+            ("Conda缓存", self._scan_conda_cache),
+            ("Chocolatey缓存", self._scan_choco_cache),
+            ("Scoop缓存", self._scan_scoop_cache),
+            ("Docker缓存", self._scan_docker_cache),
+            ("VS Code缓存", self._scan_vscode_cache),
             ("D3D着色器缓存", self._scan_d3d_cache),
             ("最近文件记录", self._scan_recent_files),
+            ("剪贴板历史", self._scan_clipboard_history),
             ("Windows Defender扫描历史", self._scan_defender_history),
+            ("OneDrive缓存", self._scan_onedrive_cache),
+            ("Teams缓存", self._scan_teams_cache),
+            ("Outlook临时文件", self._scan_outlook_temp),
+            ("备份文件", self._scan_backup_files),
+            ("日志压缩归档", self._scan_log_archives),
+            ("临时解压文件", self._scan_temp_extracted),
             ("回收站", self._scan_recycle_bin),
             ("DNS缓存", self._scan_dns_cache),
         ]
@@ -673,6 +729,461 @@ class JunkScanner:
             item_type="dns_cache",
             description="系统DNS解析缓存",
         ))
+        return result
+
+    # ── v2.1 新增扫描器 ──────────────────────────────────────
+
+    def _scan_event_log_archives(self) -> ScanResult:
+        """扫描事件日志压缩备份"""
+        result = ScanResult(category="")
+        # Windows事件日志归档 (.evtx.old, .etl.old, .etl.zip)
+        log_dir = os.path.join(self.windir, "System32", "winevt", "Logs")
+        if os.path.isdir(log_dir):
+            try:
+                for entry in os.scandir(log_dir):
+                    if entry.is_file(follow_symlinks=False):
+                        name_lower = entry.name.lower()
+                        if name_lower.endswith((".old", ".bak")) or (
+                            name_lower.endswith(".etl") and entry.stat().st_size > 10 * 1024 * 1024
+                        ):
+                            try:
+                                size = entry.stat().st_size
+                                mtime = entry.stat().st_mtime
+                                if size > 0 and self._passes_filters(size, mtime):
+                                    result.add_item(CleanItem(
+                                        path=entry.path, size=size, category="事件日志压缩备份",
+                                        item_type="file", description=entry.name, modified_time=mtime,
+                                    ))
+                            except (OSError, PermissionError):
+                                pass
+            except (OSError, PermissionError):
+                pass
+        return result
+
+    def _scan_windows_old(self) -> ScanResult:
+        """扫描Windows.old旧系统备份"""
+        result = ScanResult(category="")
+        for drive in "CDEFGH":
+            old_path = f"{drive}:\\Windows.old"
+            if os.path.isdir(old_path):
+                size = _get_size(old_path)
+                if size > 0:
+                    result.add_item(CleanItem(
+                        path=old_path, size=size, category="Windows.old旧系统",
+                        item_type="dir", description=f"{drive}:\\Windows.old",
+                    ))
+        return result
+
+    def _scan_chk_files(self) -> ScanResult:
+        """扫描ChkDsk碎片文件"""
+        result = ScanResult(category="")
+        for drive in "CDEFGH":
+            found_path = f"{drive}:\\FOUND.{{????}}"
+            for match_dir in glob.glob(found_path):
+                if os.path.isdir(match_dir):
+                    try:
+                        size = _get_size(match_dir)
+                        mtime = _get_mtime(match_dir)
+                        if size > 0 and self._passes_filters(size, mtime):
+                            result.add_item(CleanItem(
+                                path=match_dir, size=size, category="ChkDsk碎片文件",
+                                item_type="dir", description=os.path.basename(match_dir),
+                                modified_time=mtime,
+                            ))
+                    except (OSError, PermissionError):
+                        pass
+            # 也扫描根目录下的 .chk 文件
+            for chk in glob.glob(f"{drive}:\\*.chk"):
+                try:
+                    size = os.path.getsize(chk)
+                    mtime = os.path.getmtime(chk)
+                    if size > 0 and self._passes_filters(size, mtime):
+                        result.add_item(CleanItem(
+                            path=chk, size=size, category="ChkDsk碎片文件",
+                            item_type="file", description=os.path.basename(chk),
+                            modified_time=mtime,
+                        ))
+                except (OSError, PermissionError):
+                    pass
+        return result
+
+    def _scan_chromium_browsers(self) -> ScanResult:
+        """扫描其他Chromium系浏览器（Brave, Vivaldi, Opera, Arc等）"""
+        result = ScanResult(category="")
+        chromium_browsers = [
+            ("Brave", os.path.join(self.local_appdata, "Brave Software", "Brave-Browser", "User Data")),
+            ("Vivaldi", os.path.join(self.local_appdata, "Vivaldi", "User Data")),
+            ("Opera", os.path.join(self.appdata, "Opera Software", "Opera Stable")),
+            ("Opera GX", os.path.join(self.appdata, "Opera Software", "Opera GX Stable")),
+        ]
+        for browser_name, user_data in chromium_browsers:
+            if not os.path.isdir(user_data):
+                continue
+            try:
+                for entry in os.scandir(user_data):
+                    if entry.is_dir(follow_symlinks=False) and (
+                        entry.name == "Default" or entry.name.startswith("Profile")
+                    ):
+                        for cache_name in ("Cache", "Code Cache", "GPUCache", "Service Worker", "ScriptCache"):
+                            cache_path = os.path.join(entry.path, cache_name)
+                            if os.path.isdir(cache_path):
+                                size = _get_size(cache_path)
+                                if size > 0:
+                                    result.add_item(CleanItem(
+                                        path=cache_path, size=size, category=f"{browser_name}缓存",
+                                        item_type="dir", description=f"{entry.name}/{cache_name}",
+                                    ))
+                # Opera特殊结构（直接在Opera Stable下有Cache）
+                if browser_name.startswith("Opera"):
+                    for cache_name in ("Cache", "Code Cache", "GPUCache"):
+                        cache_path = os.path.join(user_data, cache_name)
+                        if os.path.isdir(cache_path):
+                            size = _get_size(cache_path)
+                            if size > 0:
+                                result.add_item(CleanItem(
+                                    path=cache_path, size=size, category=f"{browser_name}缓存",
+                                    item_type="dir", description=cache_name,
+                                ))
+            except (OSError, PermissionError):
+                pass
+        return result
+
+    def _scan_spotlight_cache(self) -> ScanResult:
+        """扫描Windows Spotlight缓存"""
+        result = ScanResult(category="")
+        spotlight_path = os.path.join(
+            self.local_appdata, "Packages",
+            "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy", "LocalState", "Assets"
+        )
+        r = self._scan_dir(spotlight_path, "Windows Spotlight缓存", include_subdirs=True)
+        result.items.extend(r.items)
+        result.total_size += r.total_size
+        # 第二个位置
+        spotlight_path2 = os.path.join(
+            self.local_appdata, "Packages",
+            "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy", "LocalState", "TargetedContentCache"
+        )
+        r2 = self._scan_dir(spotlight_path2, "Windows Spotlight缓存", include_subdirs=True)
+        result.items.extend(r2.items)
+        result.total_size += r2.total_size
+        return result
+
+    def _scan_performance_logs(self) -> ScanResult:
+        """扫描Windows性能日志"""
+        result = ScanResult(category="")
+        perf_paths = [
+            os.path.join(self.windir, "Performance", "WinSAT"),
+            os.path.join(self.windir, "System32", "LogFiles", "WMI"),
+        ]
+        for path in perf_paths:
+            r = self._scan_dir(path, "Windows性能日志", include_subdirs=True)
+            result.items.extend(r.items)
+            result.total_size += r.total_size
+        return result
+
+    def _scan_telemetry(self) -> ScanResult:
+        """扫描Windows遥测诊断数据"""
+        result = ScanResult(category="")
+        telemetry_path = os.path.join(
+            self.program_data, "Microsoft", "Diagnosis", "ETLLogs"
+        )
+        r = self._scan_dir(telemetry_path, "Windows遥测诊断数据", include_subdirs=True)
+        result.items.extend(r.items)
+        result.total_size += r.total_size
+        # diagerr.xml
+        diag_dir = os.path.join(self.program_data, "Microsoft", "Diagnosis")
+        if os.path.isdir(diag_dir):
+            for name in ("diagerr.xml", "diagwrn.xml"):
+                fp = os.path.join(diag_dir, name)
+                if os.path.isfile(fp):
+                    try:
+                        size = os.path.getsize(fp)
+                        mtime = os.path.getmtime(fp)
+                        if size > 0 and self._passes_filters(size, mtime):
+                            result.add_item(CleanItem(
+                                path=fp, size=size, category="Windows遥测诊断数据",
+                                item_type="file", description=name, modified_time=mtime,
+                            ))
+                    except (OSError, PermissionError):
+                        pass
+        return result
+
+    def _scan_go_cache(self) -> ScanResult:
+        """扫描Go模块缓存"""
+        result = ScanResult(category="")
+        gopath = os.environ.get("GOPATH", os.path.join(self.user_profile, "go"))
+        go_cache = os.path.join(gopath, "pkg", "mod", "cache")
+        if os.path.isdir(go_cache):
+            size = _get_size(go_cache)
+            if size > 0:
+                result.add_item(CleanItem(
+                    path=go_cache, size=size, category="Go模块缓存",
+                    item_type="dir", description="go/pkg/mod/cache",
+                ))
+        go_build_cache = os.path.join(os.environ.get("LOCALAPPDATA", ""), "go-build")
+        if os.path.isdir(go_build_cache):
+            size = _get_size(go_build_cache)
+            if size > 0:
+                result.add_item(CleanItem(
+                    path=go_build_cache, size=size, category="Go模块缓存",
+                    item_type="dir", description="go-build cache",
+                ))
+        return result
+
+    def _scan_cargo_cache(self) -> ScanResult:
+        """扫描Rust/Cargo缓存"""
+        result = ScanResult(category="")
+        cargo_home = os.environ.get("CARGO_HOME", os.path.join(self.user_profile, ".cargo"))
+        for subdir in ("registry", "git"):
+            cache_path = os.path.join(cargo_home, subdir)
+            if os.path.isdir(cache_path):
+                size = _get_size(cache_path)
+                if size > 0:
+                    result.add_item(CleanItem(
+                        path=cache_path, size=size, category="Rust/Cargo缓存",
+                        item_type="dir", description=f".cargo/{subdir}",
+                    ))
+        return result
+
+    def _scan_conda_cache(self) -> ScanResult:
+        """扫描Conda缓存"""
+        result = ScanResult(category="")
+        conda_cache_paths = [
+            os.path.join(self.user_profile, ".conda", "pkgs"),
+            os.path.join(self.user_profile, "miniconda3", "pkgs"),
+            os.path.join(self.user_profile, "anaconda3", "pkgs"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "conda", "conda", "pkgs"),
+        ]
+        for path in conda_cache_paths:
+            if os.path.isdir(path):
+                size = _get_size(path)
+                if size > 0:
+                    result.add_item(CleanItem(
+                        path=path, size=size, category="Conda缓存",
+                        item_type="dir", description=os.path.basename(os.path.dirname(path)) + "/pkgs",
+                    ))
+        return result
+
+    def _scan_choco_cache(self) -> ScanResult:
+        """扫描Chocolatey缓存"""
+        result = ScanResult(category="")
+        choco_cache = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Chocolatey", "Cache")
+        if os.path.isdir(choco_cache):
+            r = self._scan_dir(choco_cache, "Chocolatey缓存", include_subdirs=True)
+            result.items.extend(r.items)
+            result.total_size += r.total_size
+        return result
+
+    def _scan_scoop_cache(self) -> ScanResult:
+        """扫描Scoop缓存"""
+        result = ScanResult(category="")
+        scoop_cache = os.path.join(self.user_profile, "scoop", "cache")
+        if os.path.isdir(scoop_cache):
+            r = self._scan_dir(scoop_cache, "Scoop缓存")
+            result.items.extend(r.items)
+            result.total_size += r.total_size
+        return result
+
+    def _scan_docker_cache(self) -> ScanResult:
+        """扫描Docker Desktop缓存"""
+        result = ScanResult(category="")
+        docker_paths = [
+            os.path.join(self.local_appdata, "Docker", "log"),
+            os.path.join(self.appdata, "Docker", "log"),
+        ]
+        for path in docker_paths:
+            if os.path.isdir(path):
+                r = self._scan_dir(path, "Docker缓存", {".log"}, include_subdirs=True)
+                result.items.extend(r.items)
+                result.total_size += r.total_size
+        return result
+
+    def _scan_vscode_cache(self) -> ScanResult:
+        """扫描VS Code缓存"""
+        result = ScanResult(category="")
+        vscode_dirs = [
+            (os.path.join(self.appdata, "Code", "Cache"), "VS Code缓存"),
+            (os.path.join(self.appdata, "Code", "CachedData"), "VS Code缓存"),
+            (os.path.join(self.appdata, "Code", "CachedExtensionVSIXs"), "VS Code缓存"),
+            (os.path.join(self.appdata, "Code", "Logs"), "VS Code日志"),
+            (os.path.join(self.appdata, "Code", "User", "workspaceStorage"), "VS Code工作区存储"),
+            (os.path.join(self.local_appdata, "Programs", "Microsoft VS Code", "Cache"), "VS Code缓存"),
+        ]
+        for path, cat in vscode_dirs:
+            if os.path.isdir(path):
+                r = self._scan_dir(path, cat, include_subdirs=True)
+                result.items.extend(r.items)
+                result.total_size += r.total_size
+        return result
+
+    def _scan_clipboard_history(self) -> ScanResult:
+        """扫描剪贴板历史"""
+        result = ScanResult(category="")
+        clipboard_path = os.path.join(
+            self.local_appdata, "Microsoft", "Windows", "Clipboard"
+        )
+        r = self._scan_dir(clipboard_path, "剪贴板历史", include_subdirs=True)
+        result.items.extend(r.items)
+        result.total_size += r.total_size
+        return result
+
+    def _scan_onedrive_cache(self) -> ScanResult:
+        """扫描OneDrive缓存"""
+        result = ScanResult(category="")
+        onedrive_cache = os.path.join(self.local_appdata, "Microsoft", "OneDrive", "logs")
+        r = self._scan_dir(onedrive_cache, "OneDrive缓存", include_subdirs=True)
+        result.items.extend(r.items)
+        result.total_size += r.total_size
+        # OneDrive设置缓存
+        onedrive_settings = os.path.join(self.local_appdata, "Microsoft", "OneDrive", "settings")
+        r2 = self._scan_dir(onedrive_settings, "OneDrive缓存")
+        result.items.extend(r2.items)
+        result.total_size += r2.total_size
+        return result
+
+    def _scan_teams_cache(self) -> ScanResult:
+        """扫描Microsoft Teams缓存"""
+        result = ScanResult(category="")
+        # 新版 Teams
+        teams_new = os.path.join(self.local_appdata, "Packages", "MSTeams_8wekyb3d8bbwe", "LocalCache")
+        r = self._scan_dir(teams_new, "Teams缓存", include_subdirs=True)
+        result.items.extend(r.items)
+        result.total_size += r.total_size
+        # 经典版 Teams
+        teams_classic = os.path.join(self.appdata, "Microsoft", "Teams", "Cache")
+        r2 = self._scan_dir(teams_classic, "Teams缓存", include_subdirs=True)
+        result.items.extend(r2.items)
+        result.total_size += r2.total_size
+        teams_gpucache = os.path.join(self.appdata, "Microsoft", "Teams", "GPUCache")
+        r3 = self._scan_dir(teams_gpucache, "Teams缓存")
+        result.items.extend(r3.items)
+        result.total_size += r3.total_size
+        return result
+
+    def _scan_outlook_temp(self) -> ScanResult:
+        """扫描Outlook临时文件"""
+        result = ScanResult(category="")
+        outlook_temp = os.path.join(self.local_appdata, "Microsoft", "Outlook")
+        if not os.path.isdir(outlook_temp):
+            return result
+        try:
+            for entry in os.scandir(outlook_temp):
+                if entry.is_dir(follow_symlinks=False) and "RoamCache" in entry.name:
+                    size = _get_size(entry.path)
+                    if size > 0:
+                        result.add_item(CleanItem(
+                            path=entry.path, size=size, category="Outlook临时文件",
+                            item_type="dir", description=entry.name,
+                        ))
+                elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith((".ost.tmp", ".pst.tmp")):
+                    try:
+                        size = entry.stat().st_size
+                        if size > 0:
+                            result.add_item(CleanItem(
+                                path=entry.path, size=size, category="Outlook临时文件",
+                                item_type="file", description=entry.name,
+                            ))
+                    except (OSError, PermissionError):
+                        pass
+        except (OSError, PermissionError):
+            pass
+        return result
+
+    def _scan_backup_files(self) -> ScanResult:
+        """扫描常见备份文件（.bak, .old, .orig, .tmp~）"""
+        result = ScanResult(category="")
+        scan_roots = [
+            os.path.join(self.user_profile, "Documents"),
+            os.path.join(self.user_profile, "Desktop"),
+            os.path.join(self.user_profile, "Downloads"),
+        ]
+        backup_exts = {".bak", ".old", ".orig"}
+        for root_dir in scan_roots:
+            if not os.path.isdir(root_dir):
+                continue
+            try:
+                for root, _, files in os.walk(root_dir):
+                    # 只扫描前两层目录，避免太深
+                    depth = root.replace(root_dir, "").count(os.sep)
+                    if depth > 2:
+                        continue
+                    for f in files:
+                        f_lower = f.lower()
+                        if f_lower.endswith(tuple(backup_exts)) or f_lower.endswith(".tmp~"):
+                            fp = os.path.join(root, f)
+                            try:
+                                size = os.path.getsize(fp)
+                                mtime = os.path.getmtime(fp)
+                                if size > 1024 and self._passes_filters(size, mtime):
+                                    result.add_item(CleanItem(
+                                        path=fp, size=size, category="备份文件",
+                                        item_type="file", description=f, modified_time=mtime,
+                                    ))
+                            except (OSError, PermissionError):
+                                pass
+            except (OSError, PermissionError):
+                pass
+        return result
+
+    def _scan_log_archives(self) -> ScanResult:
+        """扫描日志压缩归档（.log.gz, .cab, .etl.zip）"""
+        result = ScanResult(category="")
+        log_dirs = [
+            os.path.join(self.windir, "Logs"),
+            os.path.join(self.windir, "Temp"),
+        ]
+        archive_exts = {".cab", ".gz", ".zip", ".log_old", ".etl_old"}
+        for log_dir in log_dirs:
+            if not os.path.isdir(log_dir):
+                continue
+            try:
+                for root, _, files in os.walk(log_dir):
+                    for f in files:
+                        if f.lower().endswith(tuple(archive_exts)):
+                            fp = os.path.join(root, f)
+                            try:
+                                size = os.path.getsize(fp)
+                                mtime = os.path.getmtime(fp)
+                                if size > 0 and self._passes_filters(size, mtime):
+                                    result.add_item(CleanItem(
+                                        path=fp, size=size, category="日志压缩归档",
+                                        item_type="file", description=f, modified_time=mtime,
+                                    ))
+                            except (OSError, PermissionError):
+                                pass
+            except (OSError, PermissionError):
+                pass
+        return result
+
+    def _scan_temp_extracted(self) -> ScanResult:
+        """扫描临时解压文件（~*.tmp, ~WPL*.tmp, ~$*开头的Office临时文件）"""
+        result = ScanResult(category="")
+        temp_dirs = [self.temp_dir]
+        if self.local_appdata:
+            local_temp = os.path.join(self.local_appdata, "Temp")
+            if os.path.isdir(local_temp):
+                temp_dirs.append(local_temp)
+        for temp_dir in temp_dirs:
+            if not os.path.isdir(temp_dir):
+                continue
+            try:
+                for entry in os.scandir(temp_dir):
+                    if entry.is_file(follow_symlinks=False):
+                        name = entry.name
+                        # ~开头的临时解压文件、~WPL临时文件、~$Office临时文件
+                        if name.startswith("~") or name.startswith("~$"):
+                            try:
+                                size = entry.stat().st_size
+                                mtime = entry.stat().st_mtime
+                                if size > 0 and self._passes_filters(size, mtime):
+                                    result.add_item(CleanItem(
+                                        path=entry.path, size=size, category="临时解压文件",
+                                        item_type="file", description=name, modified_time=mtime,
+                                    ))
+                            except (OSError, PermissionError):
+                                pass
+            except (OSError, PermissionError):
+                pass
         return result
 
 

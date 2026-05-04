@@ -335,7 +335,7 @@ def run_full_clean(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="cleancli",
-        description="CleanCLI v2.0 - Windows 系统垃圾深度清理工具",
+        description="CleanCLI v2.1 - Windows 系统垃圾深度清理工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
