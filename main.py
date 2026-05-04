@@ -1,7 +1,6 @@
 """
-CleanCLI - Windows 系统垃圾清理工具 v2.0
-主入口模块：命令行参数解析、流程编排
-支持：年龄过滤、大小阈值、模拟模式、报告导出、系统信息展示
+CleanCLI - Windows 系统垃圾清理工具 v3.0
+交互式主菜单 + CLI子命令双模式
 """
 
 import argparse
@@ -10,18 +9,18 @@ import os
 import time
 
 from cleaner import JunkScanner, clean_items, get_disk_info
-from residual import ResidualScanner, clean_residual_item
+from residual import ResidualScanner, clean_residual_item, ResidualScanResult
 from ui import (
-    print_banner, print_header, print_subheader, print_info,
-    print_success, print_warning, print_error, print_progress_bar,
+    C, print_banner, print_header, print_section,
+    _info_row, _ok, _warn, _err, _blank, Spinner, print_progress,
     display_scan_results, display_residual_results, display_system_info,
     prompt_yes_no, prompt_category_select, prompt_residual_select,
-    CleanReport, display_clean_report, export_report, format_size, Color,
+    prompt_main_menu, prompt_scan_options,
+    CleanReport, display_clean_report, export_report, fmt_size,
 )
 
 
 def check_admin() -> bool:
-    """检查是否以管理员权限运行"""
     try:
         return os.getuid() == 0
     except AttributeError:
@@ -32,188 +31,151 @@ def check_admin() -> bool:
             return False
 
 
-def _build_junk_scanner(args) -> JunkScanner:
-    """根据参数构建扫描器"""
-    older = getattr(args, "older_than", 0) or 0
-    min_kb = getattr(args, "min_size", 0) or 0
+def _admin_warning():
+    if not check_admin():
+        _warn("未以管理员权限运行，部分操作可能受限")
+        _info_row("提示", f"{C.DIM}建议右键以管理员身份运行{C.RST}")
+        _blank()
+
+
+def _build_scanner(older: int = 0, min_kb: int = 0) -> JunkScanner:
     return JunkScanner(older_than_days=older, min_size_bytes=min_kb * 1024)
 
 
-def run_info():
-    """展示系统信息"""
-    disk_info = get_disk_info()
-    display_system_info(disk_info)
+# ── 核心流程 ──────────────────────────────────────────────────
 
-
-def run_scan_only(args):
-    """仅扫描模式"""
-    print_header("系统垃圾扫描")
-    print_info("模式", "仅扫描（不清理）")
-
-    disk_info = get_disk_info()
-    display_system_info(disk_info, getattr(args, "older_than", 0), getattr(args, "min_size", 0) * 1024)
-
-    print(f"\n  {Color.CYAN}正在扫描系统垃圾文件...{Color.RESET}")
-    junk_scanner = _build_junk_scanner(args)
+def do_scan(older: int = 0, min_kb: int = 0):
+    """执行扫描，返回 (junk_results, residual_result)"""
+    spinner = Spinner("正在扫描系统垃圾文件...")
+    for _ in range(8):
+        spinner.tick()
+        time.sleep(0.05)
+    junk_scanner = _build_scanner(older, min_kb)
     junk_results = junk_scanner.scan_all()
+    spinner.done(f"垃圾扫描完成")
+
     display_scan_results(junk_results)
 
     if prompt_yes_no("是否继续扫描残留文件？", default=True):
-        print(f"\n  {Color.CYAN}正在扫描残留文件...{Color.RESET}")
+        spinner = Spinner("正在扫描残留文件...")
+        for _ in range(8):
+            spinner.tick()
+            time.sleep(0.05)
         residual_scanner = ResidualScanner()
         residual_result = residual_scanner.scan_all()
+        spinner.done(f"残留扫描完成")
         display_residual_results(residual_result)
+    else:
+        residual_result = ResidualScanResult()
 
-    print(f"\n  {Color.GREEN}扫描完成。使用 'cleancli clean' 执行清理操作。{Color.RESET}\n")
-
-
-def _do_clean_items(items, dry_run: bool, progress_prefix: str = "  清理中"):
-    """执行清理并显示进度"""
-    if not items:
-        return 0, 0, 0
-
-    total = len(items)
-    success = 0
-    failed = 0
-    freed = 0
-
-    for item in items:
-        if total > 20:
-            print_progress_bar(success + failed, total, prefix=progress_prefix)
-
-        if dry_run:
-            success += 1
-            freed += item.size
-        else:
-            s, f, fr = clean_items([item], dry_run=False)
-            success += s
-            failed += f
-            freed += fr
-
-    if total > 20:
-        print_progress_bar(total, total, prefix=progress_prefix)
-
-    return success, failed, freed
+    return junk_results, residual_result
 
 
-def run_junk_clean(args):
-    """垃圾文件清理模式"""
-    dry_run = getattr(args, "dry_run", False)
-    auto_select = getattr(args, "auto", False)
-    export_path = getattr(args, "export", None)
-
-    mode_str = "（模拟模式）" if dry_run else ""
-    print_header(f"系统垃圾清理{mode_str}")
-
-    disk_info = get_disk_info()
-    display_system_info(disk_info, getattr(args, "older_than", 0), getattr(args, "min_size", 0) * 1024)
-
-    print(f"\n  {Color.CYAN}正在扫描系统垃圾文件...{Color.RESET}")
-    junk_scanner = _build_junk_scanner(args)
-    junk_results = junk_scanner.scan_all()
+def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
+                  export_path: str = None) -> CleanReport:
+    """执行垃圾清理"""
     total_items, total_size = display_scan_results(junk_results)
 
     if total_items == 0:
-        print_success("系统很干净，没有发现垃圾文件！")
-        return
+        _ok("系统很干净，没有发现垃圾文件！")
+        return CleanReport()
 
-    if auto_select:
+    if auto:
         selected = [r for r in junk_results if r.items and not r.error]
     else:
         selected = prompt_category_select(junk_results)
 
     if not selected:
-        print_info("提示", "未选择任何清理类别，操作已取消")
-        return
+        _info_row("提示", "未选择任何类别，操作已取消")
+        return CleanReport()
 
     all_items = []
     categories = {}
-    for result in selected:
-        all_items.extend(result.items)
-        categories[result.category] = len(result.items)
+    for r in selected:
+        all_items.extend(r.items)
+        categories[r.category] = len(r.items)
 
-    selected_size = sum(item.size for item in all_items)
-    print()
-    print_subheader("清理确认")
-    print_info("待清理项目", f"{Color.YELLOW}{len(all_items)}{Color.RESET} 个")
-    print_info("预计释放空间", f"{Color.YELLOW}{format_size(selected_size)}{Color.RESET}")
+    sel_size = sum(i.size for i in all_items)
+
+    # 确认面板
+    print_section("清理确认", icon="CFM")
+    _info_row("待清理", f"{C.HYEL}{C.B}{len(all_items)}{C.RST} 个")
+    _info_row("预计释放", f"{C.HYEL}{C.B}{fmt_size(sel_size)}{C.RST}")
     if dry_run:
-        print_warning("模拟模式 - 不会实际删除文件")
+        _warn("模拟模式 - 不会实际删除文件")
 
-    for cat, count in categories.items():
-        print(f"      {Color.DIM}  {cat}: {count} 项{Color.RESET}")
+    if not auto and not prompt_yes_no("确认执行清理？", default=False):
+        _info_row("提示", "操作已取消")
+        return CleanReport()
 
-    if not auto_select and not prompt_yes_no("确认执行清理？", default=False):
-        print_info("提示", "操作已取消")
-        return
-
-    start_time = time.time()
-    print(f"\n  {Color.CYAN}{'模拟' if dry_run else '正在'}清理...{Color.RESET}")
+    # 执行清理
+    start = time.time()
+    label = "模拟清理" if dry_run else "正在清理"
+    spinner = Spinner(f"{label}中...")
+    for _ in range(6):
+        spinner.tick()
+        time.sleep(0.03)
     success, failed, freed = clean_items(all_items, dry_run=dry_run)
-    elapsed = time.time() - start_time
+    spinner.done(f"{label}完成: {success} 项, 释放 {fmt_size(freed)}")
+    elapsed = time.time() - start
 
     report = CleanReport(
-        junk_files_cleaned=success,
-        junk_space_freed=freed,
-        junk_failed=failed,
-        categories=categories,
-        dry_run=dry_run,
-        elapsed_seconds=elapsed,
+        junk_files_cleaned=success, junk_space_freed=freed,
+        junk_failed=failed, categories=categories,
+        dry_run=dry_run, elapsed_seconds=elapsed,
     )
     display_clean_report(report)
 
     if export_path:
         export_report(report, export_path, junk_results=junk_results)
 
+    return report
 
-def run_residual_clean(args):
-    """残留文件清理模式"""
-    dry_run = getattr(args, "dry_run", False)
-    auto_select = getattr(args, "auto", False)
-    export_path = getattr(args, "export", None)
 
-    mode_str = "（模拟模式）" if dry_run else ""
-    print_header(f"残留文件清理{mode_str}")
-
-    print(f"  {Color.CYAN}正在扫描残留文件...{Color.RESET}")
+def do_clean_residual(dry_run: bool = False, auto: bool = False,
+                      export_path: str = None) -> CleanReport:
+    """执行残留清理"""
+    spinner = Spinner("正在扫描残留文件...")
+    for _ in range(8):
+        spinner.tick()
+        time.sleep(0.05)
     residual_scanner = ResidualScanner()
     residual_result = residual_scanner.scan_all()
+    spinner.done("残留扫描完成")
+
     display_residual_results(residual_result)
 
     if not residual_result.residual_items:
-        print_success("系统很干净，没有发现残留文件！")
-        return
+        _ok("系统很干净，没有发现残留文件！")
+        return CleanReport()
 
-    if auto_select:
-        selected = [item for item in residual_result.residual_items if item.risk_level == "low"]
+    if auto:
+        selected = [i for i in residual_result.residual_items if i.risk_level == "low"]
     else:
         selected = prompt_residual_select(residual_result)
 
     if not selected:
-        print_info("提示", "未选择任何清理项目，操作已取消")
-        return
+        _info_row("提示", "未选择任何项目，操作已取消")
+        return CleanReport()
 
-    selected_size = sum(item.size for item in selected)
-    print()
-    print_subheader("清理确认")
-    print_info("待清理项目", f"{Color.YELLOW}{len(selected)}{Color.RESET} 个")
-    print_info("预计释放空间", f"{Color.YELLOW}{format_size(selected_size)}{Color.RESET}")
+    sel_size = sum(i.size for i in selected)
+
+    print_section("清理确认", icon="CFM")
+    _info_row("待清理", f"{C.HYEL}{C.B}{len(selected)}{C.RST} 个")
+    _info_row("预计释放", f"{C.HYEL}{C.B}{fmt_size(sel_size)}{C.RST}")
     if dry_run:
-        print_warning("模拟模式 - 不会实际删除文件")
+        _warn("模拟模式 - 不会实际删除文件")
 
-    if not auto_select and not prompt_yes_no("确认执行清理？", default=False):
-        print_info("提示", "操作已取消")
-        return
+    if not auto and not prompt_yes_no("确认执行清理？", default=False):
+        _info_row("提示", "操作已取消")
+        return CleanReport()
 
-    start_time = time.time()
-    print(f"\n  {Color.CYAN}{'模拟' if dry_run else '正在'}清理残留文件...{Color.RESET}")
-
-    success = 0
-    failed = 0
-    freed = 0
+    start = time.time()
+    label = "模拟清理" if dry_run else "正在清理"
+    success = failed = freed = 0
 
     for item in selected:
-        print_progress_bar(success + failed, len(selected), prefix="  清理中")
+        print_progress(success + failed, len(selected), prefix=f"  {label}")
         if dry_run:
             success += 1
             freed += item.size
@@ -223,200 +185,245 @@ def run_residual_clean(args):
                 freed += item.size
             else:
                 failed += 1
+    print_progress(len(selected), len(selected), prefix=f"  {label}")
 
-    print_progress_bar(len(selected), len(selected), prefix="  清理中")
-    elapsed = time.time() - start_time
-
+    elapsed = time.time() - start
     report = CleanReport(
-        residual_files_cleaned=success,
-        residual_space_freed=freed,
-        residual_failed=failed,
-        dry_run=dry_run,
-        elapsed_seconds=elapsed,
+        residual_files_cleaned=success, residual_space_freed=freed,
+        residual_failed=failed, dry_run=dry_run, elapsed_seconds=elapsed,
     )
     display_clean_report(report)
 
     if export_path:
         export_report(report, export_path, residual_result=residual_result)
 
+    return report
 
-def run_full_clean(args):
-    """完整清理模式（垃圾文件 + 残留文件）"""
-    dry_run = getattr(args, "dry_run", False)
-    auto_select = getattr(args, "auto", False)
-    export_path = getattr(args, "export", None)
 
-    mode_str = "（模拟模式）" if dry_run else ""
-    print_header(f"完整系统清理{mode_str}")
-
-    disk_info = get_disk_info()
-    display_system_info(disk_info, getattr(args, "older_than", 0), getattr(args, "min_size", 0) * 1024)
-
+def do_full_clean(older: int = 0, min_kb: int = 0, dry_run: bool = False,
+                  auto: bool = False, export_path: str = None):
+    """完整清理流程"""
     report = CleanReport(dry_run=dry_run)
-    junk_results = None
-    residual_result = None
-    start_time = time.time()
+    start = time.time()
 
-    # 阶段1: 垃圾文件
-    print_subheader("阶段 1/2: 系统垃圾文件清理")
-    print(f"  {Color.CYAN}正在扫描系统垃圾文件...{Color.RESET}")
+    # 阶段1
+    print_section("阶段 1/2  垃圾文件清理", icon="1/2")
 
-    junk_scanner = _build_junk_scanner(args)
+    spinner = Spinner("正在扫描系统垃圾文件...")
+    for _ in range(8):
+        spinner.tick()
+        time.sleep(0.05)
+    junk_scanner = _build_scanner(older, min_kb)
     junk_results = junk_scanner.scan_all()
-    total_items, total_size = display_scan_results(junk_results)
+    spinner.done("垃圾扫描完成")
+
+    total_items, _ = display_scan_results(junk_results)
 
     if total_items > 0:
-        if auto_select:
+        if auto:
             selected_junk = [r for r in junk_results if r.items and not r.error]
         else:
             selected_junk = prompt_category_select(junk_results)
 
         if selected_junk:
-            all_junk_items = []
+            all_items = []
             categories = {}
-            for result in selected_junk:
-                all_junk_items.extend(result.items)
-                categories[result.category] = len(result.items)
+            for r in selected_junk:
+                all_items.extend(r.items)
+                categories[r.category] = len(r.items)
 
-            print(f"\n  {Color.CYAN}{'模拟' if dry_run else '正在'}清理垃圾文件...{Color.RESET}")
-            success, failed, freed = clean_items(all_junk_items, dry_run=dry_run)
-            report.junk_files_cleaned = success
-            report.junk_space_freed = freed
-            report.junk_failed = failed
+            label = "模拟清理" if dry_run else "正在清理"
+            spinner = Spinner(f"{label}垃圾文件...")
+            for _ in range(6):
+                spinner.tick()
+                time.sleep(0.03)
+            s, f, fr = clean_items(all_items, dry_run=dry_run)
+            spinner.done(f"垃圾清理完成: {s} 项, 释放 {fmt_size(fr)}")
+            report.junk_files_cleaned = s
+            report.junk_space_freed = fr
+            report.junk_failed = f
             report.categories = categories
-            print_success(f"垃圾{'模拟' if dry_run else ''}清理完成: {success} 项, 释放 {format_size(freed)}")
 
-    # 阶段2: 残留文件
-    print_subheader("阶段 2/2: 残留文件清理")
-    print(f"\n  {Color.CYAN}正在扫描残留文件...{Color.RESET}")
+    # 阶段2
+    print_section("阶段 2/2  残留文件清理", icon="2/2")
 
+    spinner = Spinner("正在扫描残留文件...")
+    for _ in range(8):
+        spinner.tick()
+        time.sleep(0.05)
     residual_scanner = ResidualScanner()
     residual_result = residual_scanner.scan_all()
+    spinner.done("残留扫描完成")
+
     display_residual_results(residual_result)
 
     if residual_result.residual_items:
-        if auto_select:
-            selected_residual = [item for item in residual_result.residual_items if item.risk_level == "low"]
+        if auto:
+            sel_res = [i for i in residual_result.residual_items if i.risk_level == "low"]
         else:
-            selected_residual = prompt_residual_select(residual_result)
+            sel_res = prompt_residual_select(residual_result)
 
-        if selected_residual:
-            print(f"\n  {Color.CYAN}{'模拟' if dry_run else '正在'}清理残留文件...{Color.RESET}")
-            r_success = 0
-            r_failed = 0
-            r_freed = 0
-
-            for item in selected_residual:
-                print_progress_bar(r_success + r_failed, len(selected_residual), prefix="  清理中")
+        if sel_res:
+            label = "模拟清理" if dry_run else "正在清理"
+            rs = rf = rfr = 0
+            for item in sel_res:
+                print_progress(rs + rf, len(sel_res), prefix=f"  {label}")
                 if dry_run:
-                    r_success += 1
-                    r_freed += item.size
+                    rs += 1
+                    rfr += item.size
                 else:
                     if clean_residual_item(item):
-                        r_success += 1
-                        r_freed += item.size
+                        rs += 1
+                        rfr += item.size
                     else:
-                        r_failed += 1
+                        rf += 1
+            print_progress(len(sel_res), len(sel_res), prefix=f"  {label}")
+            _ok(f"残留清理完成: {rs} 项, 释放 {fmt_size(rfr)}")
+            report.residual_files_cleaned = rs
+            report.residual_space_freed = rfr
+            report.residual_failed = rf
 
-            print_progress_bar(len(selected_residual), len(selected_residual), prefix="  清理中")
-
-            report.residual_files_cleaned = r_success
-            report.residual_space_freed = r_freed
-            report.residual_failed = r_failed
-            print_success(f"残留{'模拟' if dry_run else ''}清理完成: {r_success} 项, 释放 {format_size(r_freed)}")
-
-    report.elapsed_seconds = time.time() - start_time
+    report.elapsed_seconds = time.time() - start
     display_clean_report(report)
 
     if export_path:
         export_report(report, export_path, junk_results, residual_result)
 
 
-def main():
+# ── CLI入口 ──────────────────────────────────────────────────
+
+def _add_common_args(p):
+    p.add_argument("--older-than", type=int, default=0, help="仅清理N天前的文件")
+    p.add_argument("--min-size", type=int, default=0, help="仅清理大于N KB的文件")
+    p.add_argument("--export", type=str, default=None, help="导出报告到JSON文件")
+
+
+def run_cli():
+    """命令行子命令模式"""
     parser = argparse.ArgumentParser(
         prog="cleancli",
-        description="CleanCLI v2.1 - Windows 系统垃圾深度清理工具",
+        description="CleanCLI v3.0 - Windows 系统垃圾深度清理工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  cleancli                        交互式完整清理
-  cleancli scan                   仅扫描，不清理
-  cleancli scan --older-than 30   扫描30天前的垃圾文件
-  cleancli clean                  清理垃圾文件
-  cleancli clean --auto           自动选择所有垃圾文件清理
-  cleancli clean --dry-run        模拟清理（不实际删除）
-  cleancli clean --export r.json  清理并导出报告
-  cleancli residual               扫描并清理残留文件
+  cleancli                        交互式主菜单
+  cleancli scan                   仅扫描
+  cleancli scan --older-than 30   扫描30天前的垃圾
+  cleancli clean --auto           自动清理所有垃圾
+  cleancli clean --dry-run        模拟清理
   cleancli residual --auto        自动清理低风险残留
-  cleancli full                   完整清理（垃圾 + 残留）
-  cleancli full --auto --dry-run  模拟完整清理
-  cleancli info                   显示系统/磁盘信息
-
-注意: 建议以管理员权限运行以获得最佳清理效果
+  cleancli full --auto            完整自动清理
+  cleancli info                   系统信息
         """,
     )
-
-    # 全局参数
     parser.add_argument("--no-banner", action="store_true", help="不显示横幅")
+    subparsers = parser.add_subparsers(dest="command")
 
-    subparsers = parser.add_subparsers(dest="command", help="可用命令")
+    subparsers.add_parser("info", help="系统和磁盘信息")
 
-    # info 命令
-    subparsers.add_parser("info", help="显示系统和磁盘信息")
+    sp = subparsers.add_parser("scan", help="仅扫描（不清理）")
+    _add_common_args(sp)
 
-    # 公共参数
-    def add_common_args(p):
-        p.add_argument("--older-than", type=int, default=0,
-                       help="仅清理N天前的文件 (默认: 不限)")
-        p.add_argument("--min-size", type=int, default=0,
-                       help="仅清理大于N KB的文件 (默认: 不限)")
-        p.add_argument("--export", type=str, default=None,
-                       help="导出清理报告到指定JSON文件")
+    sp = subparsers.add_parser("clean", help="清理垃圾文件")
+    sp.add_argument("--auto", action="store_true", help="自动选择所有类别")
+    sp.add_argument("--dry-run", action="store_true", help="模拟模式")
+    _add_common_args(sp)
 
-    # scan 命令
-    scan_parser = subparsers.add_parser("scan", help="仅扫描系统垃圾文件（不执行清理）")
-    add_common_args(scan_parser)
+    sp = subparsers.add_parser("residual", help="扫描并清理残留文件")
+    sp.add_argument("--auto", action="store_true", help="自动选择低风险项")
+    sp.add_argument("--dry-run", action="store_true", help="模拟模式")
+    sp.add_argument("--export", type=str, default=None, help="导出报告")
 
-    # clean 命令
-    clean_parser = subparsers.add_parser("clean", help="清理系统垃圾文件")
-    clean_parser.add_argument("--auto", action="store_true", help="自动选择所有类别")
-    clean_parser.add_argument("--dry-run", action="store_true", help="模拟模式，不实际删除")
-    add_common_args(clean_parser)
-
-    # residual 命令
-    residual_parser = subparsers.add_parser("residual", help="扫描并清理残留文件")
-    residual_parser.add_argument("--auto", action="store_true", help="自动选择低风险项目")
-    residual_parser.add_argument("--dry-run", action="store_true", help="模拟模式，不实际删除")
-    residual_parser.add_argument("--export", type=str, default=None, help="导出报告到JSON文件")
-
-    # full 命令
-    full_parser = subparsers.add_parser("full", help="完整清理（垃圾文件 + 残留文件）")
-    full_parser.add_argument("--auto", action="store_true", help="自动选择所有项目")
-    full_parser.add_argument("--dry-run", action="store_true", help="模拟模式，不实际删除")
-    add_common_args(full_parser)
+    sp = subparsers.add_parser("full", help="完整清理")
+    sp.add_argument("--auto", action="store_true", help="自动选择")
+    sp.add_argument("--dry-run", action="store_true", help="模拟模式")
+    _add_common_args(sp)
 
     args = parser.parse_args()
 
-    if not getattr(args, "no_banner", False):
+    if not args.no_banner:
         print_banner()
-
-    if not check_admin():
-        print_warning("当前未以管理员权限运行，部分清理操作可能受限")
-        print_info("提示", "建议右键以管理员身份运行本工具")
-        print()
+    _admin_warning()
 
     if args.command is None:
-        run_full_clean(args)
+        return False  # 进入交互式菜单
     elif args.command == "info":
-        run_info()
+        display_system_info(get_disk_info())
     elif args.command == "scan":
-        run_scan_only(args)
+        do_scan(getattr(args, "older_than", 0), getattr(args, "min_size", 0))
     elif args.command == "clean":
-        run_junk_clean(args)
+        spinner = Spinner("扫描中...")
+        for _ in range(5):
+            spinner.tick()
+            time.sleep(0.04)
+        scanner = _build_scanner(getattr(args, "older_than", 0), getattr(args, "min_size", 0))
+        junk_results = scanner.scan_all()
+        spinner.done("扫描完成")
+        do_clean_junk(junk_results, dry_run=args.dry_run, auto=args.auto, export_path=args.export)
     elif args.command == "residual":
-        run_residual_clean(args)
+        do_clean_residual(dry_run=args.dry_run, auto=args.auto, export_path=args.export)
     elif args.command == "full":
-        run_full_clean(args)
+        do_full_clean(getattr(args, "older_than", 0), getattr(args, "min_size", 0),
+                      dry_run=args.dry_run, auto=args.auto, export_path=args.export)
+    return True
+
+
+def run_interactive():
+    """交互式主菜单模式"""
+    print_banner()
+    _admin_warning()
+
+    while True:
+        choice = prompt_main_menu()
+
+        if choice == "quit":
+            _blank()
+            _p(f"  {C.DIM}感谢使用 CleanCLI，再见！{C.RST}")
+            _blank()
+            break
+
+        elif choice == "info":
+            display_system_info(get_disk_info())
+            input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
+
+        elif choice == "scan":
+            opts = prompt_scan_options()
+            do_scan(opts["older_than"], opts["min_size"])
+            input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
+
+        elif choice == "clean":
+            opts = prompt_scan_options()
+            spinner = Spinner("扫描中...")
+            for _ in range(5):
+                spinner.tick()
+                time.sleep(0.04)
+            scanner = _build_scanner(opts["older_than"], opts["min_size"])
+            junk_results = scanner.scan_all()
+            spinner.done("扫描完成")
+            do_clean_junk(junk_results, dry_run=opts["dry_run"],
+                          export_path=opts["export"])
+            input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
+
+        elif choice == "residual":
+            opts = prompt_scan_options()
+            do_clean_residual(dry_run=opts["dry_run"], export_path=opts["export"])
+            input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
+
+        elif choice == "full":
+            opts = prompt_scan_options()
+            do_full_clean(opts["older_than"], opts["min_size"],
+                          dry_run=opts["dry_run"], export_path=opts["export"])
+            input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
+
+
+def main():
+    # 如果有CLI参数则走CLI模式，否则走交互式菜单
+    has_cli_args = len(sys.argv) > 1
+    if has_cli_args:
+        handled = run_cli()
+        if handled:
+            return
+    run_interactive()
 
 
 if __name__ == "__main__":
