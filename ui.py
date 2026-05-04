@@ -1,12 +1,14 @@
 """
-CleanCLI - 交互式CLI界面模块
-提供彩色终端输出、交互式选择、进度展示和清理报告
+CleanCLI - 交互式CLI界面模块 v2.0
+提供彩色终端输出、交互式选择、进度展示、清理报告、磁盘信息、报告导出
 """
 
 import os
 import sys
+import json
+import time
 from typing import List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 from cleaner import ScanResult, CleanItem
 from residual import ResidualItem, ResidualScanResult
@@ -43,7 +45,6 @@ def _enable_ansi():
             os.system("")
         except Exception:
             pass
-        # 设置控制台UTF-8编码
         try:
             if sys.stdout.encoding != "utf-8":
                 sys.stdout.reconfigure(encoding="utf-8")
@@ -76,6 +77,19 @@ def format_size(size_bytes: int) -> str:
     return f"{size:.2f} {units[i]}"
 
 
+def format_age(days: int) -> str:
+    """格式化时间年龄"""
+    if days <= 0:
+        return "不限"
+    if days == 1:
+        return "1天以上"
+    if days < 30:
+        return f"{days}天以上"
+    if days < 365:
+        return f"{days // 30}个月以上"
+    return f"{days // 365}年以上"
+
+
 def print_banner():
     """打印程序横幅"""
     banner = f"""
@@ -89,7 +103,7 @@ def print_banner():
   ║       ╚██████╗███████╗███████╗██║  ██║██║ ╚████║        ║
   ║        ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝        ║
   ║                                                          ║
-  ║            Windows 系统垃圾清理工具 v1.0                  ║
+  ║            Windows 系统垃圾清理工具 v2.0                  ║
   ║                                                          ║
   ╚══════════════════════════════════════════════════════════╝
 {Color.RESET}"""
@@ -125,19 +139,19 @@ def print_info(label: str, value: str, indent: int = 4):
 def print_success(msg: str, indent: int = 4):
     """打印成功消息"""
     spaces = " " * indent
-    print(f"{spaces}{Color.GREEN}✓ {msg}{Color.RESET}")
+    print(f"{spaces}{Color.GREEN}[OK] {msg}{Color.RESET}")
 
 
 def print_warning(msg: str, indent: int = 4):
     """打印警告消息"""
     spaces = " " * indent
-    print(f"{spaces}{Color.YELLOW}⚠ {msg}{Color.RESET}")
+    print(f"{spaces}{Color.YELLOW}[!] {msg}{Color.RESET}")
 
 
 def print_error(msg: str, indent: int = 4):
     """打印错误消息"""
     spaces = " " * indent
-    print(f"{spaces}{Color.RED}✗ {msg}{Color.RESET}")
+    print(f"{spaces}{Color.RED}[X] {msg}{Color.RESET}")
 
 
 def print_progress_bar(current: int, total: int, width: int = 40, prefix: str = ""):
@@ -152,9 +166,41 @@ def print_progress_bar(current: int, total: int, width: int = 40, prefix: str = 
         print()
 
 
+# ── 系统信息展示 ──────────────────────────────────────────────
+
+def display_system_info(disk_info: List[dict], older_than: int = 0, min_size: int = 0):
+    """展示系统信息和过滤条件"""
+    print_header("系统信息")
+
+    import platform
+    print_info("操作系统", f"Windows {platform.version()}")
+    print_info("计算机名", platform.node())
+    print_info("处理器", platform.processor()[:50] if platform.processor() else "N/A")
+
+    if disk_info:
+        print_subheader("磁盘使用情况")
+        for disk in disk_info:
+            bar_width = 20
+            filled = int(bar_width * disk["percent"] / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            color = Color.RED if disk["percent"] > 90 else Color.YELLOW if disk["percent"] > 75 else Color.GREEN
+            print(f"    {Color.BOLD}{disk['drive']}:{Color.RESET} "
+                  f"[{color}{bar}{Color.RESET}] {disk['percent']}% "
+                  f"{Color.DIM}已用 {format_size(disk['used'])} / "
+                  f"可用 {format_size(disk['free'])} / "
+                  f"总计 {format_size(disk['total'])}{Color.RESET}")
+
+    if older_than > 0 or min_size > 0:
+        print_subheader("过滤条件")
+        if older_than > 0:
+            print_info("文件年龄", f"仅清理 {format_age(older_than)} 的文件")
+        if min_size > 0:
+            print_info("最小大小", f"仅清理 >= {format_size(min_size)} 的文件")
+
+
 # ── 扫描结果展示 ──────────────────────────────────────────────
 
-def display_scan_results(results: List[ScanResult]) -> Tuple[int, int]:
+def display_scan_results(results: List[ScanResult], show_detail: bool = True) -> Tuple[int, int]:
     """展示垃圾扫描结果，返回 (总项目数, 总大小)"""
     total_items = 0
     total_size = 0
@@ -167,7 +213,8 @@ def display_scan_results(results: List[ScanResult]) -> Tuple[int, int]:
             continue
 
         if not result.items:
-            print(f"  {Color.DIM}{result.category}: 未发现垃圾文件{Color.RESET}")
+            if show_detail:
+                print(f"  {Color.DIM}{result.category}: 未发现垃圾文件{Color.RESET}")
             continue
 
         item_count = len(result.items)
@@ -178,14 +225,13 @@ def display_scan_results(results: List[ScanResult]) -> Tuple[int, int]:
         print(f"\n  {Color.CYAN}{Color.BOLD}{result.category}{Color.RESET}"
               f"  {Color.DIM}({item_count} 项, {format_size(category_size)}){Color.RESET}")
 
-        # 显示前5项作为预览
-        for item in result.items[:5]:
-            name = os.path.basename(item.path) if item.path else "Unknown"
-            desc = f" ({item.description})" if item.description else ""
-            print(f"    {Color.DIM}• {name}{desc} - {format_size(item.size)}{Color.RESET}")
-
-        if item_count > 5:
-            print(f"    {Color.DIM}... 还有 {item_count - 5} 项{Color.RESET}")
+        if show_detail:
+            for item in result.items[:5]:
+                name = os.path.basename(item.path) if item.path else "Unknown"
+                desc = f" ({item.description})" if item.description else ""
+                print(f"    {Color.DIM}  {name}{desc} - {format_size(item.size)}{Color.RESET}")
+            if item_count > 5:
+                print(f"    {Color.DIM}  ... 还有 {item_count - 5} 项{Color.RESET}")
 
     print()
     print_separator("═", 60, Color.CYAN)
@@ -196,7 +242,7 @@ def display_scan_results(results: List[ScanResult]) -> Tuple[int, int]:
     return total_items, total_size
 
 
-def display_residual_results(result: ResidualScanResult):
+def display_residual_results(result: ResidualScanResult, show_detail: bool = True):
     """展示残留文件扫描结果"""
     print_header("残留文件扫描结果")
 
@@ -206,7 +252,6 @@ def display_residual_results(result: ResidualScanResult):
         print_success("未发现残留文件，系统很干净！")
         return
 
-    # 按类型分组显示
     by_type = {}
     for item in result.residual_items:
         by_type.setdefault(item.residual_type, []).append(item)
@@ -216,27 +261,28 @@ def display_residual_results(result: ResidualScanResult):
         "file": "残留文件",
         "registry": "残留注册表项",
         "shortcut": "孤立快捷方式",
+        "service": "孤儿服务",
+        "task": "孤儿计划任务",
+        "startup": "孤儿启动项",
     }
 
-    risk_colors = {
-        "low": Color.GREEN,
-        "medium": Color.YELLOW,
-        "high": Color.RED,
-    }
+    risk_colors = {"low": Color.GREEN, "medium": Color.YELLOW, "high": Color.RED}
 
     for rtype, items in by_type.items():
         label = type_labels.get(rtype, rtype)
         print_subheader(f"{label} ({len(items)} 项)")
 
-        for item in items:
+        display_items = items if show_detail else items[:10]
+        for item in display_items:
             risk_color = risk_colors.get(item.risk_level, Color.WHITE)
             risk_label = {"low": "低", "medium": "中", "high": "高"}.get(item.risk_level, "?")
-
             size_str = format_size(item.size) if item.size > 0 else "N/A"
             print(f"    {Color.WHITE}{item.path}{Color.RESET}")
             print(f"      {Color.DIM}关联: {item.associated_program} | "
                   f"大小: {size_str} | "
                   f"风险: {risk_color}[{risk_label}]{Color.RESET}")
+        if not show_detail and len(items) > 10:
+            print(f"    {Color.DIM}  ... 还有 {len(items) - 10} 项{Color.RESET}")
 
     print()
     print_separator("═", 60, Color.CYAN)
@@ -277,10 +323,9 @@ def prompt_category_select(results: List[ScanResult]) -> List[ScanResult]:
         print_info("提示", "没有可清理的类别")
         return []
 
-    # 显示可选项
     for idx, (i, r) in enumerate(available, 1):
         size_str = format_size(r.total_size)
-        print(f"  {Color.GREEN}{Color.BOLD}[{idx}]{Color.RESET} {r.category}"
+        print(f"  {Color.GREEN}{Color.BOLD}[{idx:>2}]{Color.RESET} {r.category}"
               f"  {Color.DIM}({len(r.items)} 项, {size_str}){Color.RESET}")
 
     print()
@@ -296,7 +341,6 @@ def prompt_category_select(results: List[ScanResult]) -> List[ScanResult]:
 
         if not answer:
             return []
-
         if answer in ("a", "all", "全部"):
             return [r for _, r in available]
 
@@ -325,26 +369,18 @@ def prompt_residual_select(result: ResidualScanResult) -> List[ResidualItem]:
         return []
 
     type_labels = {
-        "dir": "目录",
-        "file": "文件",
-        "registry": "注册表",
-        "shortcut": "快捷方式",
+        "dir": "目录", "file": "文件", "registry": "注册表",
+        "shortcut": "快捷方式", "service": "服务", "task": "任务", "startup": "启动项",
     }
+    risk_colors = {"low": Color.GREEN, "medium": Color.YELLOW, "high": Color.RED}
 
-    risk_colors = {
-        "low": Color.GREEN,
-        "medium": Color.YELLOW,
-        "high": Color.RED,
-    }
-
-    # 显示所有残留项
     for idx, item in enumerate(result.residual_items, 1):
         risk_color = risk_colors.get(item.risk_level, Color.WHITE)
         risk_label = {"low": "低", "medium": "中", "high": "高"}.get(item.risk_level, "?")
         type_label = type_labels.get(item.residual_type, item.residual_type)
         size_str = format_size(item.size) if item.size > 0 else "N/A"
 
-        print(f"  {Color.GREEN}{Color.BOLD}[{idx}]{Color.RESET} [{type_label}] {item.path}")
+        print(f"  {Color.GREEN}{Color.BOLD}[{idx:>2}]{Color.RESET} [{type_label}] {item.path}")
         print(f"      {Color.DIM}关联: {item.associated_program} | "
               f"大小: {size_str} | "
               f"风险: {risk_color}[{risk_label}]{Color.RESET}")
@@ -362,10 +398,8 @@ def prompt_residual_select(result: ResidualScanResult) -> List[ResidualItem]:
 
         if not answer:
             return []
-
         if answer == "a":
             return [item for item in result.residual_items if item.risk_level == "low"]
-
         if answer in ("all", "全部"):
             return list(result.residual_items)
 
@@ -397,6 +431,8 @@ class CleanReport:
     residual_space_freed: int = 0
     residual_failed: int = 0
     categories: dict = None
+    dry_run: bool = False
+    elapsed_seconds: float = 0.0
 
     def __post_init__(self):
         if self.categories is None:
@@ -405,26 +441,24 @@ class CleanReport:
 
 def display_clean_report(report: CleanReport):
     """展示清理报告"""
-    print_header("清理报告")
+    title = "清理报告（模拟模式）" if report.dry_run else "清理报告"
+    print_header(title)
 
     total_cleaned = report.junk_files_cleaned + report.residual_files_cleaned
     total_freed = report.junk_space_freed + report.residual_space_freed
     total_failed = report.junk_failed + report.residual_failed
 
-    # 垃圾清理统计
     print_subheader("垃圾文件清理")
     print_info("清理文件数", f"{Color.GREEN}{report.junk_files_cleaned}{Color.RESET} 个")
     print_info("释放空间", f"{Color.GREEN}{format_size(report.junk_space_freed)}{Color.RESET}")
     if report.junk_failed > 0:
         print_info("失败项目", f"{Color.RED}{report.junk_failed}{Color.RESET} 个")
 
-    # 分类统计
     if report.categories:
         print()
         for cat, count in report.categories.items():
-            print(f"      {Color.DIM}• {cat}: {count} 项{Color.RESET}")
+            print(f"      {Color.DIM}  {cat}: {count} 项{Color.RESET}")
 
-    # 残留清理统计
     if report.residual_files_cleaned > 0 or report.residual_failed > 0:
         print_subheader("残留文件清理")
         print_info("清理项目数", f"{Color.GREEN}{report.residual_files_cleaned}{Color.RESET} 个")
@@ -432,14 +466,72 @@ def display_clean_report(report: CleanReport):
         if report.residual_failed > 0:
             print_info("失败项目", f"{Color.RED}{report.residual_failed}{Color.RESET} 个")
 
-    # 总计
     print()
     print_separator("═", 60, Color.GREEN)
     print(f"  {Color.BOLD}清理总计:{Color.RESET}")
-    print(f"    {Color.GREEN}✓{Color.RESET} 共清理 {Color.GREEN}{Color.BOLD}{total_cleaned}{Color.RESET} 个项目")
-    print(f"    {Color.GREEN}✓{Color.RESET} 释放空间 {Color.GREEN}{Color.BOLD}{format_size(total_freed)}{Color.RESET}")
+    print(f"    [OK] 共清理 {Color.GREEN}{Color.BOLD}{total_cleaned}{Color.RESET} 个项目")
+    print(f"    [OK] 释放空间 {Color.GREEN}{Color.BOLD}{format_size(total_freed)}{Color.RESET}")
     if total_failed > 0:
-        print(f"    {Color.YELLOW}⚠{Color.RESET} {total_failed} 个项目清理失败（可能被占用或权限不足）")
+        print(f"    [!] {total_failed} 个项目清理失败（可能被占用或权限不足）")
+    if report.elapsed_seconds > 0:
+        print(f"    {Color.DIM}耗时: {report.elapsed_seconds:.1f} 秒{Color.RESET}")
     print_separator("═", 60, Color.GREEN)
 
-    print(f"\n  {Color.DIM}提示: 部分清理可能需要重启系统才能完全生效{Color.RESET}\n")
+    if report.dry_run:
+        print(f"\n  {Color.YELLOW}[!] 模拟模式 - 未实际删除任何文件{Color.RESET}\n")
+    else:
+        print(f"\n  {Color.DIM}提示: 部分清理可能需要重启系统才能完全生效{Color.RESET}\n")
+
+
+def export_report(report: CleanReport, filepath: str,
+                  junk_results: List[ScanResult] = None,
+                  residual_result: ResidualScanResult = None):
+    """导出清理报告到JSON文件"""
+    data = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "dry_run": report.dry_run,
+        "summary": {
+            "junk_files_cleaned": report.junk_files_cleaned,
+            "junk_space_freed": report.junk_space_freed,
+            "junk_space_freed_human": format_size(report.junk_space_freed),
+            "junk_failed": report.junk_failed,
+            "residual_files_cleaned": report.residual_files_cleaned,
+            "residual_space_freed": report.residual_space_freed,
+            "residual_space_freed_human": format_size(report.residual_space_freed),
+            "residual_failed": report.residual_failed,
+            "total_cleaned": report.junk_files_cleaned + report.residual_files_cleaned,
+            "total_freed": report.junk_space_freed + report.residual_space_freed,
+            "total_freed_human": format_size(report.junk_space_freed + report.residual_space_freed),
+            "elapsed_seconds": report.elapsed_seconds,
+        },
+        "categories": report.categories,
+    }
+
+    if junk_results:
+        data["junk_details"] = []
+        for r in junk_results:
+            if r.items:
+                data["junk_details"].append({
+                    "category": r.category,
+                    "item_count": len(r.items),
+                    "total_size": r.total_size,
+                    "total_size_human": format_size(r.total_size),
+                    "items": [{"path": i.path, "size": i.size, "description": i.description} for i in r.items[:50]],
+                })
+
+    if residual_result and residual_result.residual_items:
+        data["residual_details"] = [
+            {
+                "path": i.path, "size": i.size, "type": i.residual_type,
+                "associated": i.associated_program, "description": i.description,
+                "risk": i.risk_level,
+            }
+            for i in residual_result.residual_items
+        ]
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print_success(f"报告已导出: {filepath}")
+    except (OSError, IOError) as e:
+        print_error(f"导出失败: {e}")
