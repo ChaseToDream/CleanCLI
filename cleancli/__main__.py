@@ -1,4 +1,4 @@
-"""CleanCLI 入口 - 兼容旧方式: python main.py"""
+"""支持 python -m cleancli 方式启动"""
 
 from cleancli.main import main
 

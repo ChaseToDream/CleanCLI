@@ -12,8 +12,8 @@ import ctypes
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
-from cleaner import ScanResult, CleanItem
-from residual import ResidualItem, ResidualScanResult
+from cleancli.cleaner import ScanResult, CleanItem
+from cleancli.residual import ResidualItem, ResidualScanResult
 
 
 # ── ANSI 颜色与样式 ──────────────────────────────────────────
