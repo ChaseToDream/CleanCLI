@@ -1,6 +1,7 @@
 """
-CleanCLI - Windows 系统垃圾清理工具 v3.0
+CleanCLI - Windows 系统垃圾清理工具 v3.1
 交互式主菜单 + CLI子命令双模式
+改进：重试删除/只读清除/错误追踪/占比条/错误汇总
 """
 
 import argparse
@@ -8,12 +9,13 @@ import sys
 import os
 import time
 
-from cleaner import JunkScanner, clean_items, get_disk_info
+from cleaner import JunkScanner, clean_items, get_disk_info, get_error_summary
 from residual import ResidualScanner, clean_residual_item, ResidualScanResult
 from ui import (
     C, print_banner, print_header, print_section,
     _info_row, _ok, _warn, _err, _blank, Spinner, print_progress,
     display_scan_results, display_residual_results, display_system_info,
+    display_error_summary,
     prompt_yes_no, prompt_category_select, prompt_residual_select,
     prompt_main_menu, prompt_scan_options,
     CleanReport, display_clean_report, export_report, fmt_size,
@@ -115,9 +117,12 @@ def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
     for _ in range(6):
         spinner.tick()
         time.sleep(0.03)
-    success, failed, freed = clean_items(all_items, dry_run=dry_run)
+    success, failed, freed, details = clean_items(all_items, dry_run=dry_run)
     spinner.done(f"{label}完成: {success} 项, 释放 {fmt_size(freed)}")
     elapsed = time.time() - start
+
+    if failed > 0:
+        display_error_summary(get_error_summary(details))
 
     report = CleanReport(
         junk_files_cleaned=success, junk_space_freed=freed,
@@ -237,8 +242,10 @@ def do_full_clean(older: int = 0, min_kb: int = 0, dry_run: bool = False,
             for _ in range(6):
                 spinner.tick()
                 time.sleep(0.03)
-            s, f, fr = clean_items(all_items, dry_run=dry_run)
+            s, f, fr, details = clean_items(all_items, dry_run=dry_run)
             spinner.done(f"垃圾清理完成: {s} 项, 释放 {fmt_size(fr)}")
+            if f > 0:
+                display_error_summary(get_error_summary(details))
             report.junk_files_cleaned = s
             report.junk_space_freed = fr
             report.junk_failed = f

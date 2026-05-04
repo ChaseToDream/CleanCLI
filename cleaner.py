@@ -1,9 +1,7 @@
 """
-CleanCLI - 核心清理引擎 v2.1
-深度扫描和清理Windows系统垃圾文件：临时文件、回收站、浏览器缓存、
-系统日志、崩溃转储、.NET/Java/npm/pip/Go/Rust/Conda缓存、
-Windows Store、Installer缓存、VS Code、Docker、包管理器缓存等
-支持年龄过滤和大小阈值
+CleanCLI - 核心清理引擎 v3.0
+深度扫描和清理Windows系统垃圾文件
+改进：重试机制、只读属性清除、详细错误追踪、批量处理
 """
 
 import os
@@ -11,7 +9,9 @@ import glob
 import shutil
 import tempfile
 import ctypes
+import stat
 import time
+import gc
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -25,7 +25,15 @@ class CleanItem:
     category: str
     item_type: str  # file / dir / dns_cache / command
     description: str = ""
-    modified_time: float = 0.0  # 最后修改时间戳
+    modified_time: float = 0.0
+
+
+@dataclass
+class CleanItemResult:
+    """单个项目的清理结果"""
+    item: CleanItem
+    success: bool
+    error: str = ""  # locked / permission / not_found / unknown
 
 
 @dataclass
@@ -62,29 +70,78 @@ def _get_size(path: str) -> int:
 
 
 def _get_mtime(path: str) -> float:
-    """获取文件最后修改时间"""
     try:
         return os.path.getmtime(path)
     except (OSError, PermissionError):
         return 0.0
 
 
-def _safe_remove_file(path: str) -> bool:
-    """安全删除文件"""
+def _clear_readonly(func, path, exc):
+    """shutil.rmtree 的 onerror 回调：清除只读属性后重试"""
     try:
-        os.remove(path)
-        return True
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
     except (OSError, PermissionError):
-        return False
+        pass
 
 
-def _safe_remove_dir(path: str) -> bool:
-    """安全删除目录"""
-    try:
-        shutil.rmtree(path, ignore_errors=True)
-        return True
-    except (OSError, PermissionError):
-        return False
+def _safe_remove_file(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[bool, str]:
+    """
+    安全删除文件，带重试机制
+    返回 (成功, 错误原因)
+    """
+    for attempt in range(retries + 1):
+        try:
+            # 清除只读/隐藏属性
+            try:
+                attrs = os.stat(path).st_mode
+                if not (attrs & stat.S_IWRITE):
+                    os.chmod(path, stat.S_IWRITE)
+            except (OSError, PermissionError):
+                pass
+            os.remove(path)
+            return True, ""
+        except PermissionError:
+            if attempt < retries:
+                gc.collect()
+                time.sleep(delay)
+                continue
+            return False, "locked"
+        except FileNotFoundError:
+            return True, ""  # 文件已不存在视为成功
+        except OSError as e:
+            if attempt < retries:
+                gc.collect()
+                time.sleep(delay)
+                continue
+            return False, "unknown"
+    return False, "unknown"
+
+
+def _safe_remove_dir(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[bool, str]:
+    """
+    安全删除目录，带重试和只读属性处理
+    返回 (成功, 错误原因)
+    """
+    for attempt in range(retries + 1):
+        try:
+            shutil.rmtree(path, onerror=_clear_readonly)
+            return True, ""
+        except PermissionError:
+            if attempt < retries:
+                gc.collect()
+                time.sleep(delay)
+                continue
+            return False, "locked"
+        except FileNotFoundError:
+            return True, ""
+        except OSError:
+            if attempt < retries:
+                gc.collect()
+                time.sleep(delay)
+                continue
+            return False, "unknown"
+    return False, "unknown"
 
 
 def _is_path_safe(path: str) -> bool:
@@ -119,8 +176,6 @@ def _is_path_safe(path: str) -> bool:
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "sun", "java").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "oracle", "java").lower(),
         os.path.join(os.environ.get("ProgramData", ""), "microsoft", "windows defender", "scans").lower(),
-        # v2.1 新增安全路径
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "brave software").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "vivaldi").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "opera software").lower(),
@@ -133,11 +188,9 @@ def _is_path_safe(path: str) -> bool:
         os.path.join(os.environ.get("USERPROFILE", ""), ".cache").lower(),
         os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "registry").lower(),
         os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "git").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "pip", "cache").lower(),
         os.path.join(os.environ.get("USERPROFILE", ""), ".conda", "pkgs").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "chocolatey").lower(),
         os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "cache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onenote").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "outlook").lower(),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "teams").lower(),
@@ -1187,19 +1240,21 @@ class JunkScanner:
         return result
 
 
-def clean_items(items: List[CleanItem], dry_run: bool = False) -> tuple:
+def clean_items(items: List[CleanItem], dry_run: bool = False) -> Tuple[int, int, int, List[CleanItemResult]]:
     """
     清理指定项目
-    返回 (成功数, 失败数, 释放空间)
+    返回 (成功数, 失败数, 释放空间, 详细结果列表)
     """
     success = 0
     failed = 0
     freed = 0
+    details: List[CleanItemResult] = []
 
     for item in items:
         if dry_run:
             success += 1
             freed += item.size
+            details.append(CleanItemResult(item=item, success=True))
             continue
 
         if item.item_type == "dns_cache":
@@ -1207,31 +1262,57 @@ def clean_items(items: List[CleanItem], dry_run: bool = False) -> tuple:
             if ret == 0:
                 success += 1
                 freed += item.size
+                details.append(CleanItemResult(item=item, success=True))
             else:
                 failed += 1
+                details.append(CleanItemResult(item=item, success=False, error="command_failed"))
             continue
 
         if not _is_path_safe(item.path):
             failed += 1
+            details.append(CleanItemResult(item=item, success=False, error="unsafe_path"))
             continue
 
         try:
             if item.item_type == "file":
-                if _safe_remove_file(item.path):
+                ok, err = _safe_remove_file(item.path)
+                if ok:
                     success += 1
                     freed += item.size
+                    details.append(CleanItemResult(item=item, success=True))
                 else:
                     failed += 1
+                    details.append(CleanItemResult(item=item, success=False, error=err or "unknown"))
             elif item.item_type == "dir":
-                if _safe_remove_dir(item.path):
+                ok, err = _safe_remove_dir(item.path)
+                if ok:
                     success += 1
                     freed += item.size
+                    details.append(CleanItemResult(item=item, success=True))
                 else:
                     failed += 1
+                    details.append(CleanItemResult(item=item, success=False, error=err or "unknown"))
+            else:
+                failed += 1
+                details.append(CleanItemResult(item=item, success=False, error="unknown_type"))
         except Exception:
             failed += 1
+            details.append(CleanItemResult(item=item, success=False, error="exception"))
 
-    return success, failed, freed
+    return success, failed, freed, details
+
+
+def get_error_summary(details: List[CleanItemResult]) -> dict:
+    """从详细结果中汇总错误信息"""
+    errors = {"locked": 0, "permission": 0, "not_found": 0, "unknown": 0, "other": 0}
+    for d in details:
+        if not d.success:
+            err = d.error
+            if err in errors:
+                errors[err] += 1
+            else:
+                errors["other"] += 1
+    return {k: v for k, v in errors.items() if v > 0}
 
 
 def empty_recycle_bin() -> bool:

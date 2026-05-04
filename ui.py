@@ -122,7 +122,7 @@ def print_banner():
     │    ╚██████╗███████╗███████╗██║  ██║██║ ╚████║        │
     │     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝        │
     │                                                      │
-    │       {C.HWHT}Windows System Cleaner  v3.0{C.CYN}                  │
+    │       {C.HWHT}Windows System Cleaner  v3.1{C.CYN}                  │
     │       {C.DIM}Deep Scan · Smart Clean · Safe & Fast{C.CYN}          │
     │                                                      │
     └──────────────────────────────────────────────────────┘{C.RST}""")
@@ -229,17 +229,26 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
 
     print_header("扫描结果", icon="SCAN")
 
+    # 收集有数据的类别
+    active = [r for r in results if r.items and not r.error]
+    if not active:
+        _ok("未发现任何垃圾文件，系统很干净！")
+        return 0, 0
+
+    # 计算最大值用于条形图
+    max_sz = max(r.total_size for r in active) if active else 1
+
     # 表头
-    _p(f"  {C.DIM}{'类别':<22} {'数量':>8} {'大小':>12}  状态{C.RST}")
-    _p(f"  {C.DIM}{'─' * 50}{C.RST}")
+    _p(f"  {C.DIM}{'类别':<20} {'数量':>6} {'大小':>10}  {'占比':>5}  条形图{C.RST}")
+    _p(f"  {C.DIM}{'─' * 56}{C.RST}")
 
     for r in results:
         if r.error:
-            _p(f"  {r.category:<22} {C.RED}{'错误':>8}{C.RST} {C.DIM}{'--':>12}{C.RST}  {C.RED}[!]{C.RST}")
+            _p(f"  {r.category:<20} {C.RED}{'ERR':>6}{C.RST} {C.DIM}{'--':>10}{C.RST}  {C.RED}[!]{C.RST}")
             continue
         if not r.items:
             if show_detail:
-                _p(f"  {C.DIM}{r.category:<22} {'0':>8} {'0 B':>12}  --{C.RST}")
+                _p(f"  {C.DIM}{r.category:<20} {'0':>6} {'0 B':>10}  {'--':>5}  --{C.RST}")
             continue
 
         cnt = len(r.items)
@@ -247,34 +256,71 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
         total_items += cnt
         total_size += sz
 
-        # 根据大小标色
-        if sz > 1024 * 1024 * 1024:  # > 1GB
+    # 第二遍：计算占比后输出
+    for r in results:
+        if not r.items or r.error:
+            continue
+
+        cnt = len(r.items)
+        sz = r.total_size
+        pct = (sz / total_size * 100) if total_size > 0 else 0
+
+        # 大小颜色
+        if sz > 1024 * 1024 * 1024:
             sz_color = C.HRED
-        elif sz > 100 * 1024 * 1024:  # > 100MB
+        elif sz > 100 * 1024 * 1024:
             sz_color = C.HYEL
         else:
             sz_color = C.HWHT
 
-        _p(f"  {C.HCYN}{r.category:<22}{C.RST} {C.B}{cnt:>8}{C.RST} {sz_color}{fmt_size(sz):>12}{C.RST}  {C.HGRN}[+]{C.RST}")
+        # 条形图
+        bar_w = 14
+        filled = int(bar_w * sz / max_sz) if max_sz > 0 else 0
+        if sz > 1024 * 1024 * 1024:
+            bar = f"{C.HRED}{'█' * filled}{C.DIM}{'░' * (bar_w - filled)}{C.RST}"
+        elif sz > 100 * 1024 * 1024:
+            bar = f"{C.HYEL}{'█' * filled}{C.DIM}{'░' * (bar_w - filled)}{C.RST}"
+        else:
+            bar = f"{C.HCYN}{'█' * filled}{C.DIM}{'░' * (bar_w - filled)}{C.RST}"
+
+        pct_str = f"{pct:>4.1f}%" if pct >= 0.1 else f" {C.DIM}--{C.RST} "
+
+        _p(f"  {C.HCYN}{r.category:<20}{C.RST} {C.B}{cnt:>6}{C.RST} {sz_color}{fmt_size(sz):>10}{C.RST}  {pct_str}  {bar}")
 
         if show_detail:
             for item in r.items[:3]:
                 name = os.path.basename(item.path) if item.path else "?"
-                if len(name) > 36:
-                    name = name[:33] + "..."
-                desc = f" ({item.description})" if item.description else ""
-                _p(f"    {C.DIM}  · {name}{desc}  {fmt_size(item.size)}{C.RST}")
+                if len(name) > 34:
+                    name = name[:31] + "..."
+                _p(f"    {C.DIM}  · {name}  {fmt_size(item.size)}{C.RST}")
             if cnt > 3:
                 _p(f"    {C.DIM}  · ... 还有 {cnt - 3} 项{C.RST}")
 
     # 汇总
     _blank()
-    _p(f"  {C.HCYN}{'━' * 50}{C.RST}")
+    _p(f"  {C.HCYN}{'━' * 56}{C.RST}")
     _p(f"  {C.B}合计:{C.RST}  {C.HGRN}{C.B}{total_items}{C.RST} 个文件  "
         f"占用 {C.HYEL}{C.B}{fmt_size(total_size)}{C.RST}")
-    _p(f"  {C.HCYN}{'━' * 50}{C.RST}")
+    _p(f"  {C.HCYN}{'━' * 56}{C.RST}")
 
     return total_items, total_size
+
+
+def display_error_summary(errors: dict):
+    """展示清理错误汇总"""
+    if not errors:
+        return
+    print_section("错误详情", icon="ERR")
+    err_labels = {
+        "locked": ("文件被占用", C.HYEL),
+        "permission": ("权限不足", C.HRED),
+        "not_found": ("文件不存在", C.DIM),
+        "unknown": ("未知错误", C.HRED),
+        "other": ("其他错误", C.HRED),
+    }
+    for err_type, count in errors.items():
+        label, color = err_labels.get(err_type, (err_type, C.HWHT))
+        _p(f"    {color}[{count}]{C.RST} {C.DIM}{label}{C.RST}")
 
 
 def display_residual_results(result: ResidualScanResult, show_detail: bool = True):
