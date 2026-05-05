@@ -32,17 +32,42 @@
 ## 环境要求
 
 - **操作系统**: Windows 7/8/10/11
-- **Python**: 3.8 或更高版本
+- **Python**: 3.8 或更高版本（仅 pip 安装方式需要）
 
 ## 安装
 
-### 从 PyPI 安装（推荐）
+### 方式一：下载可执行文件（推荐，无需 Python）
 
-```bash
-pip install cleancli
+前往 [GitHub Releases](https://github.com/ChaseToDream/CleanCLI/releases) 下载最新版 `CleanCLI.exe`，双击即可运行。
+
+也可以用 PowerShell 一键下载最新版：
+
+```powershell
+Invoke-WebRequest -Uri "https://github.com/ChaseToDream/CleanCLI/releases/latest/download/CleanCLI.exe" -OutFile "CleanCLI.exe"
+.\CleanCLI.exe
 ```
 
-### 从源码安装
+### 方式二：pip 从 GitHub 安装（无需 clone）
+
+```bash
+pip install https://github.com/ChaseToDream/CleanCLI/archive/refs/heads/main.zip
+```
+
+安装后直接使用：
+
+```bash
+cleancli
+```
+
+> 如果已安装 git，也可以用：`pip install git+https://github.com/ChaseToDream/CleanCLI.git`
+
+### 方式三：pipx 安装（推荐隔离环境）
+
+```bash
+pipx install https://github.com/ChaseToDream/CleanCLI/archive/refs/heads/main.zip
+```
+
+### 方式四：从源码安装
 
 ```bash
 git clone https://github.com/ChaseToDream/CleanCLI.git
@@ -50,7 +75,7 @@ cd CleanCLI
 pip install -e .
 ```
 
-### 直接运行
+### 方式五：直接运行
 
 ```bash
 python main.py
