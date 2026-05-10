@@ -13,7 +13,7 @@ from cleancli.cleaner import JunkScanner, clean_items, get_disk_info, get_error_
 from cleancli.residual import ResidualScanner, clean_residual_item, ResidualScanResult
 from cleancli.ui import (
     C, print_banner, print_header, print_section,
-    _info_row, _ok, _warn, _err, _blank, Spinner, print_progress,
+    _info_row, _ok, _warn, _err, _blank, _p, Spinner, print_progress,
     display_scan_results, display_residual_results, display_system_info,
     display_error_summary,
     prompt_yes_no, prompt_category_select, prompt_residual_select,
