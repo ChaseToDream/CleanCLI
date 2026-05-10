@@ -44,20 +44,7 @@ class ResidualScanResult:
     errors: List[str] = field(default_factory=list)
 
 
-def _get_dir_size(path: str) -> int:
-    """获取目录大小"""
-    total = 0
-    try:
-        for dirpath, _, filenames in os.walk(path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                try:
-                    total += os.path.getsize(fp)
-                except (OSError, PermissionError):
-                    pass
-    except (OSError, PermissionError):
-        pass
-    return total
+from cleancli.cleaner import _get_size as _get_dir_size
 
 
 class ResidualScanner:
@@ -100,6 +87,7 @@ class ResidualScanner:
         self.local_appdata = os.environ.get("LOCALAPPDATA", "")
         self.appdata = os.environ.get("APPDATA", "")
         self.program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+        self.windir = os.environ.get("SYSTEMROOT", os.environ.get("WINDIR", r"C:\Windows"))
 
     def scan_all(self) -> ResidualScanResult:
         """执行完整残留扫描"""
@@ -341,25 +329,14 @@ class ResidualScanner:
 
     def _scan_orphan_tasks(self, result: ResidualScanResult):
         """扫描孤儿计划任务（指向不存在的可执行文件）"""
-        try:
-            tasks_dir = os.path.join(self.windir, "System32", "Tasks")
-            if not os.path.isdir(tasks_dir):
-                return
-            self.windir = os.environ.get("SYSTEMROOT", r"C:\Windows")
-        except Exception:
-            return
-
-        self.windir = os.environ.get("SYSTEMROOT", r"C:\Windows")
         tasks_dir = os.path.join(self.windir, "System32", "Tasks")
         if not os.path.isdir(tasks_dir):
             return
 
-        # 跳过 Microsoft 和 Windows 系统任务
         skip_prefixes = {"Microsoft", "Windows", "MicrosoftEdge", "Google", "Opera"}
 
         try:
             for root, dirs, files in os.walk(tasks_dir):
-                # 跳过系统任务目录
                 rel = os.path.relpath(root, tasks_dir)
                 first_part = rel.split(os.sep)[0] if os.sep in rel else rel
                 if first_part in skip_prefixes:
@@ -370,8 +347,6 @@ class ResidualScanner:
                     task_path = os.path.join(root, f)
                     try:
                         tree = ET.parse(task_path)
-                        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
-                        # 查找 Exec 节点中的 Command
                         for exec_elem in tree.iter():
                             if exec_elem.tag.endswith("}Command") or exec_elem.tag == "Command":
                                 cmd = exec_elem.text
@@ -478,12 +453,13 @@ def clean_residual_item(item: ResidualItem) -> bool:
     """清理单个残留项目"""
     try:
         if item.residual_type in ("file", "shortcut"):
-            os.remove(item.path)
-            return True
+            from cleancli.cleaner import _safe_remove_file
+            ok, _ = _safe_remove_file(item.path)
+            return ok
         elif item.residual_type == "dir":
-            import shutil
-            shutil.rmtree(item.path, ignore_errors=True)
-            return True
+            from cleancli.cleaner import _safe_remove_dir
+            ok, _ = _safe_remove_dir(item.path)
+            return ok
         elif item.residual_type == "registry":
             return _delete_registry_key(item.path)
         elif item.residual_type in ("service", "task", "startup"):
@@ -494,7 +470,7 @@ def clean_residual_item(item: ResidualItem) -> bool:
 
 
 def _delete_registry_key(key_path: str) -> bool:
-    """删除注册表项"""
+    """递归删除注册表项（含子键）"""
     try:
         if key_path.startswith("HKLM\\"):
             hkey = winreg.HKEY_LOCAL_MACHINE
@@ -504,10 +480,25 @@ def _delete_registry_key(key_path: str) -> bool:
             subkey = key_path[5:]
         else:
             return False
-        winreg.DeleteKey(hkey, subkey)
+        _recursive_delete_key(hkey, subkey)
         return True
     except (OSError, WindowsError):
         return False
+
+
+def _recursive_delete_key(hkey, subkey: str):
+    """递归删除注册表键及其所有子键"""
+    try:
+        with winreg.OpenKey(hkey, subkey, 0, winreg.KEY_ALL_ACCESS) as key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                    _recursive_delete_key(hkey, f"{subkey}\\{child}")
+                except OSError:
+                    break
+        winreg.DeleteKey(hkey, subkey)
+    except (OSError, WindowsError):
+        raise
 
 
 def _clean_system_entry(item: ResidualItem) -> bool:

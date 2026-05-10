@@ -229,16 +229,13 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
 
     print_header("扫描结果", icon="SCAN")
 
-    # 收集有数据的类别
     active = [r for r in results if r.items and not r.error]
     if not active:
         _ok("未发现任何垃圾文件，系统很干净！")
         return 0, 0
 
-    # 计算最大值用于条形图
     max_sz = max(r.total_size for r in active) if active else 1
 
-    # 表头
     _p(f"  {C.DIM}{'类别':<20} {'数量':>6} {'大小':>10}  {'占比':>5}  条形图{C.RST}")
     _p(f"  {C.DIM}{'─' * 56}{C.RST}")
 
@@ -256,16 +253,8 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
         total_items += cnt
         total_size += sz
 
-    # 第二遍：计算占比后输出
-    for r in results:
-        if not r.items or r.error:
-            continue
+        pct = (sz / max(max_sz, 1) * 100)
 
-        cnt = len(r.items)
-        sz = r.total_size
-        pct = (sz / total_size * 100) if total_size > 0 else 0
-
-        # 大小颜色
         if sz > 1024 * 1024 * 1024:
             sz_color = C.HRED
         elif sz > 100 * 1024 * 1024:
@@ -273,7 +262,6 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
         else:
             sz_color = C.HWHT
 
-        # 条形图
         bar_w = 14
         filled = int(bar_w * sz / max_sz) if max_sz > 0 else 0
         if sz > 1024 * 1024 * 1024:
@@ -296,7 +284,6 @@ def display_scan_results(results: List[ScanResult], show_detail: bool = True) ->
             if cnt > 3:
                 _p(f"    {C.DIM}  · ... 还有 {cnt - 3} 项{C.RST}")
 
-    # 汇总
     _blank()
     _p(f"  {C.HCYN}{'━' * 56}{C.RST}")
     _p(f"  {C.B}合计:{C.RST}  {C.HGRN}{C.B}{total_items}{C.RST} 个文件  "
@@ -315,6 +302,9 @@ def display_error_summary(errors: dict):
         "locked": ("文件被占用", C.HYEL),
         "permission": ("权限不足", C.HRED),
         "not_found": ("文件不存在", C.DIM),
+        "unsafe_path": ("路径不安全", C.HYEL),
+        "command_failed": ("命令执行失败", C.HYEL),
+        "recycle_bin_failed": ("回收站清理失败", C.HYEL),
         "unknown": ("未知错误", C.HRED),
         "other": ("其他错误", C.HRED),
     }

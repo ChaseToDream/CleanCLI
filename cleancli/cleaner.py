@@ -11,10 +11,8 @@ import tempfile
 import ctypes
 import stat
 import time
-import gc
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 
 @dataclass
@@ -85,14 +83,13 @@ def _clear_readonly(func, path, exc):
         pass
 
 
-def _safe_remove_file(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[bool, str]:
+def _safe_remove_file(path: str, retries: int = 2, delay: float = 0.3) -> Tuple[bool, str]:
     """
     安全删除文件，带重试机制
     返回 (成功, 错误原因)
     """
     for attempt in range(retries + 1):
         try:
-            # 清除只读/隐藏属性
             try:
                 attrs = os.stat(path).st_mode
                 if not (attrs & stat.S_IWRITE):
@@ -103,22 +100,20 @@ def _safe_remove_file(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[
             return True, ""
         except PermissionError:
             if attempt < retries:
-                gc.collect()
-                time.sleep(delay)
+                time.sleep(delay * (attempt + 1))
                 continue
             return False, "locked"
         except FileNotFoundError:
-            return True, ""  # 文件已不存在视为成功
+            return True, ""
         except OSError as e:
             if attempt < retries:
-                gc.collect()
-                time.sleep(delay)
+                time.sleep(delay * (attempt + 1))
                 continue
             return False, "unknown"
     return False, "unknown"
 
 
-def _safe_remove_dir(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[bool, str]:
+def _safe_remove_dir(path: str, retries: int = 2, delay: float = 0.3) -> Tuple[bool, str]:
     """
     安全删除目录，带重试和只读属性处理
     返回 (成功, 错误原因)
@@ -129,16 +124,14 @@ def _safe_remove_dir(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[b
             return True, ""
         except PermissionError:
             if attempt < retries:
-                gc.collect()
-                time.sleep(delay)
+                time.sleep(delay * (attempt + 1))
                 continue
             return False, "locked"
         except FileNotFoundError:
             return True, ""
         except OSError:
             if attempt < retries:
-                gc.collect()
-                time.sleep(delay)
+                time.sleep(delay * (attempt + 1))
                 continue
             return False, "unknown"
     return False, "unknown"
@@ -146,62 +139,77 @@ def _safe_remove_dir(path: str, retries: int = 2, delay: float = 0.1) -> Tuple[b
 
 def _is_path_safe(path: str) -> bool:
     """检查路径是否安全（防止误删重要文件）"""
-    path_lower = path.lower()
+    path_lower = os.path.normcase(os.path.normpath(path)).lower()
+    if not os.path.exists(path):
+        return False
     safe_prefixes = [
-        os.environ.get("TEMP", "").lower(),
-        os.environ.get("TMP", "").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "temp").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "inetcache").lower(),
-        os.environ.get("SYSTEMROOT", "").lower() + "\\temp",
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "wer").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "logs").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "panther").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "debug").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "prefetch").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "softwaredistribution").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "minidump").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "livekernelreports").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "google").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "edge").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "mozilla").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "crashdumps").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "notifications").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "d3dscache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "fontcache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "recent").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm-cache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "pip", "cache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "yarn", "cache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "sun", "java").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "oracle", "java").lower(),
-        os.path.join(os.environ.get("ProgramData", ""), "microsoft", "windows defender", "scans").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "brave software").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "vivaldi").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "opera software").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "programs", "microsoft vs code").lower(),
-        os.path.join(os.environ.get("APPDATA", ""), "code", "cache").lower(),
-        os.path.join(os.environ.get("APPDATA", ""), "code", "cacheddata").lower(),
-        os.path.join(os.environ.get("APPDATA", ""), "code", "logs").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "docker").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "go").lower(),
-        os.path.join(os.environ.get("USERPROFILE", ""), ".cache").lower(),
-        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "registry").lower(),
-        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "git").lower(),
-        os.path.join(os.environ.get("USERPROFILE", ""), ".conda", "pkgs").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "chocolatey").lower(),
-        os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "cache").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onenote").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "outlook").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "teams").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onedrive").lower(),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "packages").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "localservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "networkservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization").lower(),
-        os.path.join(os.environ.get("SYSTEMROOT", ""), "performance", "winsat").lower(),
+        os.environ.get("TEMP", ""),
+        os.environ.get("TMP", ""),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "temp"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "inetcache"),
+        os.environ.get("SYSTEMROOT", "") + "\\temp",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "explorer"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "wer"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "logs"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "panther"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "debug"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "prefetch"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "softwaredistribution"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "minidump"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "livekernelreports"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "google"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "edge"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "mozilla"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "crashdumps"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "notifications"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "d3dscache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "fontcache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "recent"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm-cache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "pip", "cache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "yarn", "cache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "sun", "java"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "oracle", "java"),
+        os.path.join(os.environ.get("ProgramData", ""), "microsoft", "windows defender", "scans"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "brave software"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "vivaldi"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "opera software"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "programs", "microsoft vs code"),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "cache"),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "cacheddata"),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "cachedextensionvsixs"),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "logs"),
+        os.path.join(os.environ.get("APPDATA", ""), "code", "user", "workspacestorage"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "docker"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "go"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cache"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "registry"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "git"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".conda", "pkgs"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "chocolatey"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "cache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onenote"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "outlook"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "teams"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onedrive"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "packages"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "localservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "serviceprofiles", "networkservice", "appdata", "local", "microsoft", "windows", "deliveryoptimization"),
+        os.path.join(os.environ.get("SYSTEMROOT", ""), "performance", "winsat"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "windows", "clipboard"),
+        os.path.join(os.environ.get("APPDATA", ""), "microsoft", "teams", "cache"),
+        os.path.join(os.environ.get("APPDATA", ""), "microsoft", "teams", "gpucache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "packages", "msteams_8wekyb3d8bbwe", "localcache"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onedrive", "logs"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "microsoft", "onedrive", "settings"),
+        os.path.join(os.environ.get("WINDIR", ""), "installer", "$patchcache$"),
+        os.path.join(os.environ.get("PROGRAMDATA", ""), "microsoft", "diagnosis", "etllogs"),
     ]
     for prefix in safe_prefixes:
-        if prefix and path_lower.startswith(prefix):
+        if not prefix:
+            continue
+        norm_prefix = os.path.normcase(os.path.normpath(prefix)).lower()
+        if path_lower.startswith(norm_prefix):
             return True
     return False
 
@@ -513,54 +521,51 @@ class JunkScanner:
             pass
         return result
 
-    def _scan_chrome_cache(self) -> ScanResult:
-        """扫描Chrome浏览器缓存"""
+    def _scan_chromium_profile_caches(self, browser_name: str, user_data: str,
+                                       cache_names: tuple = ("Cache", "Code Cache", "GPUCache", "Service Worker", "ScriptCache"),
+                                       scan_root_caches: bool = False) -> ScanResult:
+        """通用 Chromium 系浏览器缓存扫描"""
         result = ScanResult(category="")
-        chrome_base = os.path.join(self.local_appdata, "Google", "Chrome", "User Data")
-        if not os.path.isdir(chrome_base):
+        if not os.path.isdir(user_data):
             return result
-        # 扫描所有 Profile
         try:
-            for entry in os.scandir(chrome_base):
+            for entry in os.scandir(user_data):
                 if entry.is_dir(follow_symlinks=False) and (
                     entry.name == "Default" or entry.name.startswith("Profile")
                 ):
-                    for cache_name in ("Cache", "Code Cache", "GPUCache", "Service Worker", "ScriptCache"):
+                    for cache_name in cache_names:
                         cache_path = os.path.join(entry.path, cache_name)
                         if os.path.isdir(cache_path):
                             size = _get_size(cache_path)
                             if size > 0:
                                 result.add_item(CleanItem(
-                                    path=cache_path, size=size, category="Chrome缓存",
+                                    path=cache_path, size=size, category=f"{browser_name}缓存",
                                     item_type="dir", description=f"{entry.name}/{cache_name}",
                                 ))
+            if scan_root_caches:
+                for cache_name in cache_names[:3]:
+                    cache_path = os.path.join(user_data, cache_name)
+                    if os.path.isdir(cache_path):
+                        size = _get_size(cache_path)
+                        if size > 0:
+                            result.add_item(CleanItem(
+                                path=cache_path, size=size, category=f"{browser_name}缓存",
+                                item_type="dir", description=cache_name,
+                            ))
         except (OSError, PermissionError):
             pass
         return result
 
+    def _scan_chrome_cache(self) -> ScanResult:
+        """扫描Chrome浏览器缓存"""
+        chrome_base = os.path.join(self.local_appdata, "Google", "Chrome", "User Data")
+        return self._scan_chromium_profile_caches("Chrome", chrome_base)
+
     def _scan_edge_cache(self) -> ScanResult:
         """扫描Edge浏览器缓存"""
-        result = ScanResult(category="")
         edge_base = os.path.join(self.local_appdata, "Microsoft", "Edge", "User Data")
-        if not os.path.isdir(edge_base):
-            return result
-        try:
-            for entry in os.scandir(edge_base):
-                if entry.is_dir(follow_symlinks=False) and (
-                    entry.name == "Default" or entry.name.startswith("Profile")
-                ):
-                    for cache_name in ("Cache", "Code Cache", "GPUCache", "Service Worker"):
-                        cache_path = os.path.join(entry.path, cache_name)
-                        if os.path.isdir(cache_path):
-                            size = _get_size(cache_path)
-                            if size > 0:
-                                result.add_item(CleanItem(
-                                    path=cache_path, size=size, category="Edge缓存",
-                                    item_type="dir", description=f"{entry.name}/{cache_name}",
-                                ))
-        except (OSError, PermissionError):
-            pass
-        return result
+        return self._scan_chromium_profile_caches("Edge", edge_base,
+                                                   cache_names=("Cache", "Code Cache", "GPUCache", "Service Worker"))
 
     def _scan_firefox_cache(self) -> ScanResult:
         """扫描Firefox浏览器缓存"""
@@ -764,12 +769,19 @@ class JunkScanner:
     def _scan_recycle_bin(self) -> ScanResult:
         """扫描回收站"""
         result = ScanResult(category="")
+        total_size = 0
         for drive in "CDEFGHIJ":
             recycle_path = f"{drive}:\\$Recycle.Bin"
             if os.path.isdir(recycle_path):
-                r = self._scan_dir(recycle_path, "回收站", include_subdirs=True)
-                result.items.extend(r.items)
-                result.total_size += r.total_size
+                total_size += _get_size(recycle_path)
+        if total_size > 0:
+            result.add_item(CleanItem(
+                path="[Recycle Bin - All Drives]",
+                size=total_size,
+                category="回收站",
+                item_type="recycle_bin",
+                description="所有驱动器回收站内容",
+            ))
         return result
 
     def _scan_dns_cache(self) -> ScanResult:
@@ -864,41 +876,16 @@ class JunkScanner:
         """扫描其他Chromium系浏览器（Brave, Vivaldi, Opera, Arc等）"""
         result = ScanResult(category="")
         chromium_browsers = [
-            ("Brave", os.path.join(self.local_appdata, "Brave Software", "Brave-Browser", "User Data")),
-            ("Vivaldi", os.path.join(self.local_appdata, "Vivaldi", "User Data")),
-            ("Opera", os.path.join(self.appdata, "Opera Software", "Opera Stable")),
-            ("Opera GX", os.path.join(self.appdata, "Opera Software", "Opera GX Stable")),
+            ("Brave", os.path.join(self.local_appdata, "Brave Software", "Brave-Browser", "User Data"), False),
+            ("Vivaldi", os.path.join(self.local_appdata, "Vivaldi", "User Data"), False),
+            ("Opera", os.path.join(self.appdata, "Opera Software", "Opera Stable"), True),
+            ("Opera GX", os.path.join(self.appdata, "Opera Software", "Opera GX Stable"), True),
+            ("Arc", os.path.join(self.local_appdata, "Arc", "User Data"), False),
         ]
-        for browser_name, user_data in chromium_browsers:
-            if not os.path.isdir(user_data):
-                continue
-            try:
-                for entry in os.scandir(user_data):
-                    if entry.is_dir(follow_symlinks=False) and (
-                        entry.name == "Default" or entry.name.startswith("Profile")
-                    ):
-                        for cache_name in ("Cache", "Code Cache", "GPUCache", "Service Worker", "ScriptCache"):
-                            cache_path = os.path.join(entry.path, cache_name)
-                            if os.path.isdir(cache_path):
-                                size = _get_size(cache_path)
-                                if size > 0:
-                                    result.add_item(CleanItem(
-                                        path=cache_path, size=size, category=f"{browser_name}缓存",
-                                        item_type="dir", description=f"{entry.name}/{cache_name}",
-                                    ))
-                # Opera特殊结构（直接在Opera Stable下有Cache）
-                if browser_name.startswith("Opera"):
-                    for cache_name in ("Cache", "Code Cache", "GPUCache"):
-                        cache_path = os.path.join(user_data, cache_name)
-                        if os.path.isdir(cache_path):
-                            size = _get_size(cache_path)
-                            if size > 0:
-                                result.add_item(CleanItem(
-                                    path=cache_path, size=size, category=f"{browser_name}缓存",
-                                    item_type="dir", description=cache_name,
-                                ))
-            except (OSError, PermissionError):
-                pass
+        for browser_name, user_data, scan_root in chromium_browsers:
+            r = self._scan_chromium_profile_caches(browser_name, user_data, scan_root_caches=scan_root)
+            result.items.extend(r.items)
+            result.total_size += r.total_size
         return result
 
     def _scan_spotlight_cache(self) -> ScanResult:
@@ -1250,7 +1237,18 @@ def clean_items(items: List[CleanItem], dry_run: bool = False) -> Tuple[int, int
     freed = 0
     details: List[CleanItemResult] = []
 
+    seen_paths: Set[str] = set()
+    deduped_items = []
     for item in items:
+        if item.item_type in ("dns_cache", "command", "recycle_bin"):
+            deduped_items.append(item)
+            continue
+        norm = os.path.normcase(os.path.normpath(item.path))
+        if norm not in seen_paths:
+            seen_paths.add(norm)
+            deduped_items.append(item)
+
+    for item in deduped_items:
         if dry_run:
             success += 1
             freed += item.size
@@ -1292,6 +1290,23 @@ def clean_items(items: List[CleanItem], dry_run: bool = False) -> Tuple[int, int
                 else:
                     failed += 1
                     details.append(CleanItemResult(item=item, success=False, error=err or "unknown"))
+            elif item.item_type == "command":
+                ret = os.system(item.path)
+                if ret == 0:
+                    success += 1
+                    freed += item.size
+                    details.append(CleanItemResult(item=item, success=True))
+                else:
+                    failed += 1
+                    details.append(CleanItemResult(item=item, success=False, error="command_failed"))
+            elif item.item_type == "recycle_bin":
+                if empty_recycle_bin():
+                    success += 1
+                    freed += item.size
+                    details.append(CleanItemResult(item=item, success=True))
+                else:
+                    failed += 1
+                    details.append(CleanItemResult(item=item, success=False, error="recycle_bin_failed"))
             else:
                 failed += 1
                 details.append(CleanItemResult(item=item, success=False, error="unknown_type"))
@@ -1304,7 +1319,11 @@ def clean_items(items: List[CleanItem], dry_run: bool = False) -> Tuple[int, int
 
 def get_error_summary(details: List[CleanItemResult]) -> dict:
     """从详细结果中汇总错误信息"""
-    errors = {"locked": 0, "permission": 0, "not_found": 0, "unknown": 0, "other": 0}
+    errors = {
+        "locked": 0, "permission": 0, "not_found": 0,
+        "unsafe_path": 0, "command_failed": 0, "recycle_bin_failed": 0,
+        "unknown": 0, "other": 0,
+    }
     for d in details:
         if not d.success:
             err = d.error
