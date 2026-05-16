@@ -1,7 +1,7 @@
 """
-CleanCLI - Windows 系统垃圾清理工具 v3.1
+CleanCLI - 主入口模块 v3.1
 交互式主菜单 + CLI子命令双模式
-改进：重试删除/只读清除/错误追踪/占比条/错误汇总
+负责 UI 编排，业务逻辑委托给 engine 模块
 """
 
 import argparse
@@ -9,28 +9,40 @@ import sys
 import os
 import time
 
-from cleancli.cleaner import JunkScanner, clean_items, get_disk_info, get_error_summary
-from cleancli.residual import ResidualScanner, clean_residual_item, ResidualScanResult
+from cleancli import __version__
+from cleancli.cleaner import get_error_summary
+from cleancli.engine import (
+    CleanReport, check_admin, build_scanner,
+    scan_junk, scan_residual,
+    select_junk_categories, select_residual_items,
+    execute_clean_junk, execute_clean_residual,
+    make_report,
+)
+from cleancli.residual import get_clean_action_description
 from cleancli.ui import (
     C, print_banner, print_header, print_section,
     _info_row, _ok, _warn, _err, _blank, _p, Spinner, print_progress,
     display_scan_results, display_residual_results, display_system_info,
-    display_error_summary,
+    display_error_summary, display_clean_report, export_report,
     prompt_yes_no, prompt_category_select, prompt_residual_select,
-    prompt_main_menu, prompt_scan_options,
-    CleanReport, display_clean_report, export_report, fmt_size,
+    prompt_main_menu, prompt_scan_options, fmt_size,
 )
+from cleancli.cleaner import get_disk_info
 
 
-def check_admin() -> bool:
-    try:
-        return os.getuid() == 0
-    except AttributeError:
-        import ctypes
-        try:
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            return False
+# ── UI 回调 ──────────────────────────────────────────────────
+
+def _on_clean_error(item, error: str):
+    """实时清理错误回调"""
+    err_labels = {
+        "locked": "文件被占用",
+        "permission": "权限不足",
+        "not_found": "文件不存在",
+        "unsafe_path": "路径不安全",
+    }
+    label = err_labels.get(error, error)
+    name = os.path.basename(item.path) if item.path else "?"
+    _warn(f"{name}: {label}")
 
 
 def _admin_warning():
@@ -40,37 +52,23 @@ def _admin_warning():
         _blank()
 
 
-def _build_scanner(older: int = 0, min_kb: int = 0) -> JunkScanner:
-    return JunkScanner(older_than_days=older, min_size_bytes=min_kb * 1024)
-
-
-# ── 核心流程 ──────────────────────────────────────────────────
+# ── 核心流程（UI 编排层）──────────────────────────────────────────
 
 def do_scan(older: int = 0, min_kb: int = 0):
-    """执行扫描，返回 (junk_results, residual_result)"""
-    spinner = Spinner("正在扫描系统垃圾文件...")
-    for _ in range(8):
-        spinner.tick()
-        time.sleep(0.05)
-    junk_scanner = _build_scanner(older, min_kb)
-    junk_results = junk_scanner.scan_all()
-    spinner.done(f"垃圾扫描完成")
+    """执行扫描"""
+    with Spinner("正在扫描系统垃圾文件...") as s:
+        junk_results = scan_junk(older, min_kb)
+        s.done("垃圾扫描完成")
 
     display_scan_results(junk_results)
 
     if prompt_yes_no("是否继续扫描残留文件？", default=True):
-        spinner = Spinner("正在扫描残留文件...")
-        for _ in range(8):
-            spinner.tick()
-            time.sleep(0.05)
-        residual_scanner = ResidualScanner()
-        residual_result = residual_scanner.scan_all()
-        spinner.done(f"残留扫描完成")
+        with Spinner("正在扫描残留文件...") as s:
+            residual_result = scan_residual()
+            s.done("残留扫描完成")
         display_residual_results(residual_result)
-    else:
-        residual_result = ResidualScanResult()
 
-    return junk_results, residual_result
+    return junk_results
 
 
 def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
@@ -83,7 +81,7 @@ def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
         return CleanReport()
 
     if auto:
-        selected = [r for r in junk_results if r.items and not r.error]
+        selected = select_junk_categories(junk_results, auto=True)
     else:
         selected = prompt_category_select(junk_results)
 
@@ -91,17 +89,10 @@ def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
         _info_row("提示", "未选择任何类别，操作已取消")
         return CleanReport()
 
-    all_items = []
-    categories = {}
-    for r in selected:
-        all_items.extend(r.items)
-        categories[r.category] = len(r.items)
+    sel_size = sum(i.size for r in selected for i in r.items)
 
-    sel_size = sum(i.size for i in all_items)
-
-    # 确认面板
     print_section("清理确认", icon="CFM")
-    _info_row("待清理", f"{C.HYEL}{C.B}{len(all_items)}{C.RST} 个")
+    _info_row("待清理", f"{C.HYEL}{C.B}{total_items}{C.RST} 个")
     _info_row("预计释放", f"{C.HYEL}{C.B}{fmt_size(sel_size)}{C.RST}")
     if dry_run:
         _warn("模拟模式 - 不会实际删除文件")
@@ -110,24 +101,21 @@ def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
         _info_row("提示", "操作已取消")
         return CleanReport()
 
-    # 执行清理
     start = time.time()
     label = "模拟清理" if dry_run else "正在清理"
-    spinner = Spinner(f"{label}中...")
-    for _ in range(6):
-        spinner.tick()
-        time.sleep(0.03)
-    success, failed, freed, details = clean_items(all_items, dry_run=dry_run)
-    spinner.done(f"{label}完成: {success} 项, 释放 {fmt_size(freed)}")
+    with Spinner(f"{label}中...") as s:
+        success, failed, freed, details, categories = execute_clean_junk(
+            selected, dry_run=dry_run, on_error=_on_clean_error
+        )
+        s.done(f"{label}完成: {success} 项, 释放 {fmt_size(freed)}")
     elapsed = time.time() - start
 
     if failed > 0:
         display_error_summary(get_error_summary(details))
 
-    report = CleanReport(
-        junk_files_cleaned=success, junk_space_freed=freed,
-        junk_failed=failed, categories=categories,
-        dry_run=dry_run, elapsed_seconds=elapsed,
+    report = make_report(
+        junk_result=(success, failed, freed),
+        categories=categories, dry_run=dry_run, elapsed=elapsed,
     )
     display_clean_report(report)
 
@@ -140,13 +128,9 @@ def do_clean_junk(junk_results, dry_run: bool = False, auto: bool = False,
 def do_clean_residual(dry_run: bool = False, auto: bool = False,
                       export_path: str = None) -> CleanReport:
     """执行残留清理"""
-    spinner = Spinner("正在扫描残留文件...")
-    for _ in range(8):
-        spinner.tick()
-        time.sleep(0.05)
-    residual_scanner = ResidualScanner()
-    residual_result = residual_scanner.scan_all()
-    spinner.done("残留扫描完成")
+    with Spinner("正在扫描残留文件...") as s:
+        residual_result = scan_residual()
+        s.done("残留扫描完成")
 
     display_residual_results(residual_result)
 
@@ -155,7 +139,7 @@ def do_clean_residual(dry_run: bool = False, auto: bool = False,
         return CleanReport()
 
     if auto:
-        selected = [i for i in residual_result.residual_items if i.risk_level == "low"]
+        selected = select_residual_items(residual_result, auto=True)
     else:
         selected = prompt_residual_select(residual_result)
 
@@ -177,25 +161,28 @@ def do_clean_residual(dry_run: bool = False, auto: bool = False,
 
     start = time.time()
     label = "模拟清理" if dry_run else "正在清理"
-    success = failed = freed = 0
 
+    def _on_progress(current, total):
+        print_progress(current, total, prefix=f"  {label}")
+
+    def _on_item_start(item):
+        if item.residual_type in ("registry", "service", "task", "startup"):
+            _info_row("", get_clean_action_description(item))
+
+    # 系统级操作预览
     for item in selected:
-        print_progress(success + failed, len(selected), prefix=f"  {label}")
-        if dry_run:
-            success += 1
-            freed += item.size
-        else:
-            if clean_residual_item(item):
-                success += 1
-                freed += item.size
-            else:
-                failed += 1
+        if not dry_run and item.residual_type in ("registry", "service", "task", "startup"):
+            _on_item_start(item)
+
+    success, failed, freed = execute_clean_residual(
+        selected, dry_run=dry_run, on_progress=_on_progress
+    )
     print_progress(len(selected), len(selected), prefix=f"  {label}")
 
     elapsed = time.time() - start
-    report = CleanReport(
-        residual_files_cleaned=success, residual_space_freed=freed,
-        residual_failed=failed, dry_run=dry_run, elapsed_seconds=elapsed,
+    report = make_report(
+        residual_result=(success, failed, freed),
+        dry_run=dry_run, elapsed=elapsed,
     )
     display_clean_report(report)
 
@@ -211,84 +198,69 @@ def do_full_clean(older: int = 0, min_kb: int = 0, dry_run: bool = False,
     report = CleanReport(dry_run=dry_run)
     start = time.time()
 
-    # 阶段1
+    # 阶段1: 垃圾清理
     print_section("阶段 1/2  垃圾文件清理", icon="1/2")
 
-    spinner = Spinner("正在扫描系统垃圾文件...")
-    for _ in range(8):
-        spinner.tick()
-        time.sleep(0.05)
-    junk_scanner = _build_scanner(older, min_kb)
-    junk_results = junk_scanner.scan_all()
-    spinner.done("垃圾扫描完成")
+    with Spinner("正在扫描系统垃圾文件...") as s:
+        junk_results = scan_junk(older, min_kb)
+        s.done("垃圾扫描完成")
 
     total_items, _ = display_scan_results(junk_results)
 
     if total_items > 0:
         if auto:
-            selected_junk = [r for r in junk_results if r.items and not r.error]
+            selected_junk = select_junk_categories(junk_results, auto=True)
         else:
             selected_junk = prompt_category_select(junk_results)
 
         if selected_junk:
-            all_items = []
-            categories = {}
-            for r in selected_junk:
-                all_items.extend(r.items)
-                categories[r.category] = len(r.items)
-
             label = "模拟清理" if dry_run else "正在清理"
-            spinner = Spinner(f"{label}垃圾文件...")
-            for _ in range(6):
-                spinner.tick()
-                time.sleep(0.03)
-            s, f, fr, details = clean_items(all_items, dry_run=dry_run)
-            spinner.done(f"垃圾清理完成: {s} 项, 释放 {fmt_size(fr)}")
-            if f > 0:
+            with Spinner(f"{label}垃圾文件...") as s:
+                success, failed, freed, details, categories = execute_clean_junk(
+                    selected_junk, dry_run=dry_run, on_error=_on_clean_error
+                )
+                s.done(f"垃圾清理完成: {success} 项, 释放 {fmt_size(freed)}")
+            if failed > 0:
                 display_error_summary(get_error_summary(details))
-            report.junk_files_cleaned = s
-            report.junk_space_freed = fr
-            report.junk_failed = f
+            report.junk_files_cleaned = success
+            report.junk_space_freed = freed
+            report.junk_failed = failed
             report.categories = categories
 
-    # 阶段2
+    # 阶段2: 残留清理
     print_section("阶段 2/2  残留文件清理", icon="2/2")
 
-    spinner = Spinner("正在扫描残留文件...")
-    for _ in range(8):
-        spinner.tick()
-        time.sleep(0.05)
-    residual_scanner = ResidualScanner()
-    residual_result = residual_scanner.scan_all()
-    spinner.done("残留扫描完成")
+    with Spinner("正在扫描残留文件...") as s:
+        residual_result = scan_residual()
+        s.done("残留扫描完成")
 
     display_residual_results(residual_result)
 
     if residual_result.residual_items:
         if auto:
-            sel_res = [i for i in residual_result.residual_items if i.risk_level == "low"]
+            sel_res = select_residual_items(residual_result, auto=True)
         else:
             sel_res = prompt_residual_select(residual_result)
 
         if sel_res:
             label = "模拟清理" if dry_run else "正在清理"
-            rs = rf = rfr = 0
+
+            def _on_progress(current, total):
+                print_progress(current, total, prefix=f"  {label}")
+
+            # 系统级操作预览
             for item in sel_res:
-                print_progress(rs + rf, len(sel_res), prefix=f"  {label}")
-                if dry_run:
-                    rs += 1
-                    rfr += item.size
-                else:
-                    if clean_residual_item(item):
-                        rs += 1
-                        rfr += item.size
-                    else:
-                        rf += 1
+                if not dry_run and item.residual_type in ("registry", "service", "task", "startup"):
+                    _info_row("", get_clean_action_description(item))
+
+            success, failed, freed = execute_clean_residual(
+                sel_res, dry_run=dry_run, on_progress=_on_progress
+            )
             print_progress(len(sel_res), len(sel_res), prefix=f"  {label}")
-            _ok(f"残留清理完成: {rs} 项, 释放 {fmt_size(rfr)}")
-            report.residual_files_cleaned = rs
-            report.residual_space_freed = rfr
-            report.residual_failed = rf
+            _ok(f"残留清理完成: {success} 项, 释放 {fmt_size(freed)}")
+            report.residual_files_cleaned = success
+            report.residual_space_freed = freed
+            report.residual_failed = failed
 
     report.elapsed_seconds = time.time() - start
     display_clean_report(report)
@@ -309,7 +281,7 @@ def run_cli():
     """命令行子命令模式"""
     parser = argparse.ArgumentParser(
         prog="cleancli",
-        description="CleanCLI v3.0 - Windows 系统垃圾深度清理工具",
+        description=f"CleanCLI v{__version__} - Windows 系统垃圾深度清理工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -324,6 +296,7 @@ def run_cli():
         """,
     )
     parser.add_argument("--no-banner", action="store_true", help="不显示横幅")
+    parser.add_argument("--version", action="version", version=f"CleanCLI v{__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("info", help="系统和磁盘信息")
@@ -353,19 +326,15 @@ def run_cli():
     _admin_warning()
 
     if args.command is None:
-        return False  # 进入交互式菜单
+        return False
     elif args.command == "info":
         display_system_info(get_disk_info())
     elif args.command == "scan":
         do_scan(getattr(args, "older_than", 0), getattr(args, "min_size", 0))
     elif args.command == "clean":
-        spinner = Spinner("扫描中...")
-        for _ in range(5):
-            spinner.tick()
-            time.sleep(0.04)
-        scanner = _build_scanner(getattr(args, "older_than", 0), getattr(args, "min_size", 0))
-        junk_results = scanner.scan_all()
-        spinner.done("扫描完成")
+        with Spinner("扫描中...") as s:
+            junk_results = scan_junk(getattr(args, "older_than", 0), getattr(args, "min_size", 0))
+            s.done("扫描完成")
         do_clean_junk(junk_results, dry_run=args.dry_run, auto=args.auto, export_path=args.export)
     elif args.command == "residual":
         do_clean_residual(dry_run=args.dry_run, auto=args.auto, export_path=args.export)
@@ -400,13 +369,9 @@ def run_interactive():
 
         elif choice == "clean":
             opts = prompt_scan_options()
-            spinner = Spinner("扫描中...")
-            for _ in range(5):
-                spinner.tick()
-                time.sleep(0.04)
-            scanner = _build_scanner(opts["older_than"], opts["min_size"])
-            junk_results = scanner.scan_all()
-            spinner.done("扫描完成")
+            with Spinner("扫描中...") as s:
+                junk_results = scan_junk(opts["older_than"], opts["min_size"])
+                s.done("扫描完成")
             do_clean_junk(junk_results, dry_run=opts["dry_run"],
                           export_path=opts["export"])
             input(f"\n  {C.DIM}按回车返回主菜单...{C.RST}")
@@ -424,7 +389,6 @@ def run_interactive():
 
 
 def main():
-    # 如果有CLI参数则走CLI模式，否则走交互式菜单
     has_cli_args = len(sys.argv) > 1
     if has_cli_args:
         handled = run_cli()

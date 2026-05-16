@@ -12,8 +12,10 @@ import ctypes
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
+from cleancli import __version__
 from cleancli.cleaner import ScanResult, CleanItem
 from cleancli.residual import ResidualItem, ResidualScanResult
+from cleancli.engine import CleanReport
 
 
 # ── ANSI 颜色与样式 ──────────────────────────────────────────
@@ -122,7 +124,7 @@ def print_banner():
     │    ╚██████╗███████╗███████╗██║  ██║██║ ╚████║        │
     │     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝        │
     │                                                      │
-    │       {C.HWHT}Windows System Cleaner  v3.1{C.CYN}                  │
+    │       {C.HWHT}Windows System Cleaner  v{__version__}{C.CYN}                  │
     │       {C.DIM}Deep Scan · Smart Clean · Safe & Fast{C.CYN}          │
     │                                                      │
     └──────────────────────────────────────────────────────┘{C.RST}""")
@@ -158,7 +160,7 @@ def _err(msg: str, indent: int = 4):
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 class Spinner:
-    """终端旋转动画"""
+    """终端旋转动画，支持上下文管理器"""
     def __init__(self, msg: str = ""):
         self.msg = msg
         self._i = 0
@@ -171,6 +173,17 @@ class Spinner:
 
     def done(self, msg: str = ""):
         _p(f"\r  {C.HGRN}✓{C.RST} {msg or self.msg}                    ")
+
+    def __enter__(self):
+        self._running = True
+        for _ in range(6):
+            self.tick()
+            time.sleep(0.03)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._running = False
+        return False
 
 def print_progress(current: int, total: int, width: int = 36, prefix: str = ""):
     if total == 0:
@@ -556,23 +569,7 @@ def prompt_scan_options() -> dict:
     return opts
 
 
-# ── 清理报告 ──────────────────────────────────────────────
-
-@dataclass
-class CleanReport:
-    junk_files_cleaned: int = 0
-    junk_space_freed: int = 0
-    junk_failed: int = 0
-    residual_files_cleaned: int = 0
-    residual_space_freed: int = 0
-    residual_failed: int = 0
-    categories: dict = None
-    dry_run: bool = False
-    elapsed_seconds: float = 0.0
-
-    def __post_init__(self):
-        if self.categories is None:
-            self.categories = {}
+# ── 清理报告展示 ──────────────────────────────────────────────
 
 
 def display_clean_report(report: CleanReport):
@@ -654,7 +651,7 @@ def export_report(report: CleanReport, filepath: str,
                     "item_count": len(r.items),
                     "total_size": r.total_size,
                     "total_size_human": fmt_size(r.total_size),
-                    "items": [{"path": i.path, "size": i.size, "description": i.description} for i in r.items[:50]],
+                    "items": [{"path": i.path, "size": i.size, "description": i.description} for i in r.items],
                 })
     if residual_result and residual_result.residual_items:
         data["residual_details"] = [

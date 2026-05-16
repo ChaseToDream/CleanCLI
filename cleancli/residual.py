@@ -12,6 +12,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional
 
+from cleancli.config import SYSTEM_DIRS, SYSTEM_PUBLISHERS
+
 
 @dataclass
 class InstalledProgram:
@@ -68,19 +70,6 @@ class ResidualScanner:
         (os.path.join(os.environ.get("LOCALAPPDATA", ""), ""), "AppData/Local"),
         (os.path.join(os.environ.get("ProgramData", r"C:\ProgramData")), "ProgramData"),
     ]
-
-    SYSTEM_DIRS = {
-        "microsoft", "windows", "google", "mozilla", "intel", "nvidia",
-        "amd", "realtek", "common files", "internet explorer",
-        "windows defender", "windows mail", "windows media player",
-        "windows nt", "windows photo viewer", "windows portable devices",
-        "windows sidebar", "windowspowershell", "packages", "connecteddevicesplatform",
-        "temp", "temporary internet files", "crashdumps", "thumb",
-    }
-
-    SYSTEM_PUBLISHERS = {
-        "microsoft corporation", "microsoft", "windows",
-    }
 
     def __init__(self):
         self.user_profile = os.environ.get("USERPROFILE", "")
@@ -162,7 +151,7 @@ class ResidualScanner:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
                     dir_name_lower = entry.name.lower()
-                    if dir_name_lower in self.SYSTEM_DIRS:
+                    if dir_name_lower in SYSTEM_DIRS:
                         continue
                     norm_path = os.path.normcase(os.path.normpath(entry.path))
                     is_installed = any(
@@ -190,7 +179,7 @@ class ResidualScanner:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
                     dir_name_lower = entry.name.lower()
-                    if dir_name_lower in self.SYSTEM_DIRS:
+                    if dir_name_lower in SYSTEM_DIRS:
                         continue
                     is_associated = False
                     for name in known_names:
@@ -430,13 +419,63 @@ class ResidualScanner:
             return False
 
     def _resolve_shortcut_target(self, lnk_path: str) -> Optional[str]:
-        """解析快捷方式目标"""
+        """解析快捷方式目标（纯 Python 实现，无需 win32com）"""
         try:
-            import win32com.client
-            shell = win32com.client.Dispatch("WScript.Shell")
-            shortcut = shell.CreateShortCut(lnk_path)
-            return shortcut.Targetpath
-        except Exception:
+            with open(lnk_path, "rb") as f:
+                data = f.read()
+            # ShellLink Header: 76 bytes minimum
+            if len(data) < 76:
+                return None
+            # 验证签名 ShellLink (4C 00 00 00)
+            if data[:4] != b"\x4c\x00\x00\x00":
+                return None
+            # LinkFlags at offset 20 (4 bytes, little-endian)
+            flags = int.from_bytes(data[20:24], "little")
+            has_link_info = bool(flags & 0x02)  # HasLinkInfo flag
+            has_id_list = bool(flags & 0x01)    # HasLinkTargetIDList flag
+
+            offset = 76  # After header
+
+            # Skip LinkTargetIDList if present
+            if has_id_list:
+                if offset + 2 > len(data):
+                    return None
+                id_list_size = int.from_bytes(data[offset:offset + 2], "little")
+                offset += 2 + id_list_size
+
+            # Parse LinkInfo if present
+            if has_link_info:
+                if offset + 4 > len(data):
+                    return None
+                link_info_size = int.from_bytes(data[offset:offset + 4], "little")
+                if link_info_size < 8:
+                    return None
+                link_info_data = data[offset:offset + link_info_size]
+
+                # LinkInfoHeaderSize at offset 4 within LinkInfo
+                if len(link_info_data) < 16:
+                    return None
+                header_size = int.from_bytes(link_info_data[4:8], "little")
+
+                # LinkInfoFlags at offset 8
+                info_flags = int.from_bytes(link_info_data[8:12], "little")
+                has_local_path = bool(info_flags & 0x01)  # VolumeIDAndLocalBasePath
+
+                if has_local_path and header_size >= 28:
+                    # LocalBasePathOffset at offset 16 within LinkInfo
+                    local_path_offset = int.from_bytes(link_info_data[16:20], "little")
+                    abs_offset = offset + local_path_offset
+                    if abs_offset < len(data):
+                        # Read null-terminated string
+                        end = data.index(b"\x00", abs_offset) if b"\x00" in data[abs_offset:] else abs_offset
+                        local_path = data[abs_offset:end].decode("ascii", errors="ignore")
+                        if local_path:
+                            return local_path
+
+                offset += link_info_size
+
+            return None
+        except (OSError, ValueError):
             return None
 
     @staticmethod
@@ -449,8 +488,10 @@ class ResidualScanner:
             return ""
 
 
-def clean_residual_item(item: ResidualItem) -> bool:
-    """清理单个残留项目"""
+def clean_residual_item(item: ResidualItem, dry_run: bool = False) -> bool:
+    """清理单个残留项目，dry_run=True 时仅预览不执行"""
+    if dry_run:
+        return True
     try:
         if item.residual_type in ("file", "shortcut"):
             from cleancli.cleaner import _safe_remove_file
@@ -467,6 +508,26 @@ def clean_residual_item(item: ResidualItem) -> bool:
     except (OSError, PermissionError):
         pass
     return False
+
+
+def get_clean_action_description(item: ResidualItem) -> str:
+    """返回可读的操作描述，用于预览"""
+    if item.residual_type == "registry":
+        return f"删除注册表项: {item.path}"
+    elif item.residual_type == "service":
+        svc_name = item.path.replace("Service: ", "")
+        return f"删除 Windows 服务: {svc_name}"
+    elif item.residual_type == "task":
+        task_name = item.path.replace("Task: ", "")
+        return f"删除计划任务: {task_name}"
+    elif item.residual_type == "startup":
+        entry_name = item.path.replace("Startup: ", "")
+        return f"删除启动项: {entry_name}"
+    elif item.residual_type == "dir":
+        return f"删除目录: {item.path}"
+    elif item.residual_type in ("file", "shortcut"):
+        return f"删除文件: {item.path}"
+    return f"清理: {item.path}"
 
 
 def _delete_registry_key(key_path: str) -> bool:
